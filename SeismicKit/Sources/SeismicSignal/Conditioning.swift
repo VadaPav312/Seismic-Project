@@ -78,6 +78,83 @@ public enum Detrend {
 /// solver. Deliberately not a general library.
 public enum LinearAlgebra {
 
+    /// An LU decomposition, kept so a matrix can be solved many times over.
+    ///
+    /// This exists for the Newmark integrator. Its effective stiffness matrix
+    /// is constant while the structure stays linear, so eliminating it afresh
+    /// at every time step — as the solver used to — repeats an O(n³) job
+    /// thousands of times for an answer that has not changed. Factorising once
+    /// and substituting per step is O(n²), which for a hundred-storey building
+    /// is the difference between a resonance sweep taking minutes and taking a
+    /// second.
+    public struct LUFactorisation: Sendable {
+        let upper: [[Double]]
+        /// Multipliers below the diagonal, in the same layout as `upper`.
+        let lower: [[Double]]
+        let pivots: [Int]
+        public let size: Int
+
+        /// Forward then back substitution against an already-factorised matrix.
+        public func solve(_ b: [Double]) -> [Double]? {
+            guard b.count == size else { return nil }
+
+            // Apply the same row swaps the factorisation used.
+            var y = [Double](repeating: 0, count: size)
+            for row in 0..<size { y[row] = b[pivots[row]] }
+
+            // Forward substitution through the unit lower triangle.
+            for row in 1..<size {
+                var sum = y[row]
+                for column in 0..<row { sum -= lower[row][column] * y[column] }
+                y[row] = sum
+            }
+
+            // Back substitution through the upper triangle.
+            var out = [Double](repeating: 0, count: size)
+            for row in stride(from: size - 1, through: 0, by: -1) {
+                var sum = y[row]
+                for column in (row + 1)..<size { sum -= upper[row][column] * out[column] }
+                let pivot = upper[row][row]
+                guard abs(pivot) > 1e-300 else { return nil }
+                out[row] = sum / pivot
+            }
+            return out
+        }
+    }
+
+    /// Factorises with partial pivoting. Returns nil for a singular matrix
+    /// rather than producing confident nonsense.
+    public static func factorise(_ a: [[Double]]) -> LUFactorisation? {
+        let n = a.count
+        guard n > 0, a.allSatisfy({ $0.count == n }) else { return nil }
+
+        var upper = a
+        var lower = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
+        var pivots = Array(0..<n)
+
+        for column in 0..<n {
+            var best = column
+            for row in (column + 1)..<n where abs(upper[row][column]) > abs(upper[best][column]) {
+                best = row
+            }
+            guard abs(upper[best][column]) > 1e-14 else { return nil }
+            if best != column {
+                upper.swapAt(best, column)
+                lower.swapAt(best, column)
+                pivots.swapAt(best, column)
+            }
+
+            let diagonal = upper[column][column]
+            for row in (column + 1)..<n {
+                let factor = upper[row][column] / diagonal
+                lower[row][column] = factor
+                guard factor != 0 else { continue }
+                for c in column..<n { upper[row][c] -= factor * upper[column][c] }
+            }
+        }
+        return LUFactorisation(upper: upper, lower: lower, pivots: pivots, size: n)
+    }
+
     /// Gaussian elimination with partial pivoting. Returns nil for a singular
     /// system rather than producing confident nonsense.
     public static func solve(_ a: [[Double]], _ b: [Double]) -> [Double]? {

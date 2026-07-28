@@ -438,7 +438,10 @@ final class AppEnvironment: ObservableObject {
                      assessment: latestAssessment,
                      isConnected: connectionState.isLive,
                      isSimulated: isUsingSimulatedData,
-                     lastEventAt: events.first?.startTime)
+                     lastEventAt: selectedBuilding
+                        .flatMap { building in
+                            events.first { $0.buildingID == building.id }?.startTime
+                        })
     }
 
     /// Runs the warning sequence without firing anything — the drill.

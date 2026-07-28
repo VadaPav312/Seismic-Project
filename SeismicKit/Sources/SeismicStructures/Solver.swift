@@ -244,10 +244,12 @@ public enum ModalAnalysis {
             }
             if offDiagonal.squareRoot() < tolerance { break }
 
+            var rotated = false
             for p in 0..<(n - 1) {
                 for q in (p + 1)..<n {
                     let apq = a[p][q]
                     guard abs(apq) > tolerance * 1e-3 else { continue }
+                    rotated = true
 
                     let app = a[p][p], aqq = a[q][q]
                     let theta = (aqq - app) / (2 * apq)
@@ -274,6 +276,12 @@ public enum ModalAnalysis {
                     }
                 }
             }
+
+            // A sweep that rotated nothing has nothing left to zero. Without
+            // this the loop runs its full sixty sweeps on an already-diagonal
+            // matrix, which on a hundred-storey model is tens of millions of
+            // pointless operations.
+            if !rotated { break }
         }
 
         let values = (0..<n).map { a[$0][$0] }
@@ -373,8 +381,69 @@ public enum ModalAnalysis {
         modes(of: building).map(\.period)
     }
 
+    /// The first mode's period, without solving for every mode.
+    ///
+    /// The full eigendecomposition returns n periods and n mode shapes; this
+    /// wants one number. Inverse power iteration converges on the *smallest*
+    /// eigenvalue — which is the fundamental — using the LU factorisation of
+    /// the stiffness matrix, so each iteration is a substitution rather than
+    /// another decomposition. On a hundred-storey tower that is the difference
+    /// between tens of millions of operations and tens of thousands, and the
+    /// solver asks for it twice on every single run.
     public static func fundamentalPeriod(of building: ShearBuilding) -> Double {
-        naturalPeriods(of: building).first ?? 0
+        let n = building.degreesOfFreedom
+        guard n > 0 else { return 0 }
+
+        let masses = building.storeys.map(\.mass)
+        guard masses.allSatisfy({ $0 > 0 }) else { return naturalPeriods(of: building).first ?? 0 }
+
+        // Same substitution the full solver uses: K̃ = M^(−1/2)·K·M^(−1/2),
+        // which turns the generalised problem into an ordinary symmetric one
+        // without ever forming an inverse.
+        let root = masses.map { $0.squareRoot() }
+        let k = building.stiffnessMatrix
+        var scaled = [[Double]](repeating: [Double](repeating: 0, count: n), count: n)
+        for i in 0..<n {
+            for j in 0..<n { scaled[i][j] = k[i][j] / (root[i] * root[j]) }
+        }
+
+        guard let factorisation = LinearAlgebra.factorise(scaled) else {
+            return naturalPeriods(of: building).first ?? 0
+        }
+
+        // Iterate x ← K̃⁻¹x, normalising each time. The Rayleigh quotient of
+        // the converged vector is the smallest eigenvalue, ω².
+        var x = [Double](repeating: 1, count: n)
+        var eigenvalue = 0.0
+
+        for _ in 0..<100 {
+            guard let next = factorisation.solve(x) else {
+                return naturalPeriods(of: building).first ?? 0
+            }
+            let norm = next.reduce(0) { $0 + $1 * $1 }.squareRoot()
+            guard norm > 1e-300, norm.isFinite else {
+                return naturalPeriods(of: building).first ?? 0
+            }
+            let normalised = next.map { $0 / norm }
+
+            // Rayleigh quotient xᵀK̃x, with x already unit length.
+            var quotient = 0.0
+            for i in 0..<n {
+                var row = 0.0
+                for j in 0..<n { row += scaled[i][j] * normalised[j] }
+                quotient += normalised[i] * row
+            }
+
+            let converged = abs(quotient - eigenvalue) <= abs(quotient) * 1e-12
+            eigenvalue = quotient
+            x = normalised
+            if converged { break }
+        }
+
+        guard eigenvalue > 0, eigenvalue.isFinite else {
+            return naturalPeriods(of: building).first ?? 0
+        }
+        return 2 * Double.pi / eigenvalue.squareRoot()
     }
 }
 
@@ -686,6 +755,7 @@ public enum StructuralSolver {
         baseShear.reserveCapacity(steps / stride + 2)
 
         var effective = effectiveStiffness(k: k, m: m, c: c, a0: a0, a1: a1)
+        var factorisation = LinearAlgebra.factorise(effective)
         var needsRebuild = false
         var collapsed = false
 
@@ -700,6 +770,10 @@ public enum StructuralSolver {
                     k = working.stiffnessMatrix
                     c = RayleighDamping.matrix(for: working)
                     effective = effectiveStiffness(k: k, m: m, c: c, a0: a0, a1: a1)
+                    // Factorised here and reused for every step until the
+                    // structure degrades, rather than being eliminated afresh
+                    // thousands of times for a matrix that has not changed.
+                    factorisation = LinearAlgebra.factorise(effective)
                     needsRebuild = false
                 }
 
@@ -717,7 +791,7 @@ public enum StructuralSolver {
                     load[i] += damping
                 }
 
-                guard let uNext = LinearAlgebra.solve(effective, load) else { break }
+                guard let factorisation, let uNext = factorisation.solve(load) else { break }
                 var aNext = [Double](repeating: 0, count: n)
                 var vNext = [Double](repeating: 0, count: n)
                 for i in 0..<n {
@@ -786,7 +860,7 @@ public enum StructuralSolver {
             }
         }
 
-        let finalPeriod = ModalAnalysis.modes(of: working).first?.period ?? initialPeriod
+        let finalPeriod = ModalAnalysis.fundamentalPeriod(of: working)
 
         var results: [StoreyResult] = []
         for i in 0..<n {
@@ -985,8 +1059,18 @@ public enum ResonanceSweep {
         return list.compactMap { frequency -> Point? in
             guard frequency > 0.01, frequency < sampleRate / 4 else { return nil }
             let seconds = Swift.max(cyclesPerFrequency / frequency, 4)
+
+            // The dwell has to be long in *cycles* to reach steady state, which
+            // at a tenth of a hertz is two minutes of simulated time. Sampling
+            // that at a fixed 100 Hz spends twelve thousand steps resolving a
+            // wave that changes twenty times a second at most. The rate instead
+            // follows whichever is faster — the drive or the building's own
+            // motion — with plenty of margin over Nyquist.
+            let fastest = Swift.max(frequency, natural)
+            let stepRate = Swift.min(Swift.max(20 * fastest, 20), sampleRate)
+
             let drive = SyntheticMotion.sine(frequency: frequency, seconds: seconds,
-                                             sampleRate: sampleRate, amplitude: amplitude)
+                                             sampleRate: stepRate, amplitude: amplitude)
             // Degradation off: a sweep is a probe, not an event, and letting it
             // damage the model would make each point depend on the last.
             let result = StructuralSolver.run(building, groundAcceleration: drive,

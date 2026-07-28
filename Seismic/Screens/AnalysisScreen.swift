@@ -22,6 +22,8 @@ struct AnalysisScreen: View {
     @State private var isSmoothed = true
     @State private var analysis: Analysis?
     @State private var isWorking = false
+    @State private var anomalyModel: AnomalyDetection.Model?
+    @State private var anomalyVerdict: AnomalyDetection.Verdict?
 
     enum RecordSource: String, CaseIterable, Identifiable {
         case ambient, lastEvent
@@ -106,6 +108,7 @@ struct AnalysisScreen: View {
             .padding(Theme.Metrics.screenPadding)
         }
         .task(id: recordSource) { await compute() }
+        .task(id: env.observations.count) { trainAnomalyModel() }
         .onChange(of: window) { _, _ in Task { await compute() } }
     }
 
@@ -418,54 +421,60 @@ struct AnalysisScreen: View {
     /// building's own measurements it means everything, and the Mahalanobis
     /// distance is the version of that question that accounts for the fact that
     /// period and temperature vary together rather than independently.
+    @ViewBuilder
     private var anomalySection: some View {
-        let history = ModeTracking.history(of: 1, in: env.observations)
-        let features = history.map { [$0.period, $0.temperature ?? 15] }
-        let model = AnomalyDetection.train(observations: features,
-                                           featureNames: ["Period", "Temperature"])
-        let latest = features.last ?? []
-        let verdict = AnomalyDetection.evaluate(latest, model: model)
-
-        return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+        // Read from the cache rather than trained here: this is a covariance
+        // fit over a year of measurements, and `body` runs far more often than
+        // the measurements change.
+        VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
             SectionLabel("Is this normal for this building?",
                          systemImage: "chart.dots.scatter",
-                         trailing: model.isTrained ? "\(model.sampleCount) samples" : "Untrained")
+                         trailing: (anomalyModel?.isTrained ?? false)
+                            ? "\(anomalyModel?.sampleCount ?? 0) samples" : "Untrained")
 
-            HStack(spacing: 10) {
-                Image(systemName: verdict.isAnomalous
-                      ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                    .font(.system(size: 18))
-                    .foregroundStyle(verdict.isAnomalous ? Theme.Palette.verdictAmber
-                                                         : Theme.Palette.verdictGreen)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(String(format: "Mahalanobis distance %.2f", verdict.distance))
-                        .font(Theme.Typography.numeric)
-                        .foregroundStyle(Theme.Palette.textPrimary)
-                    Text(String(format: "threshold %.2f", model.threshold))
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Palette.textTertiary)
+            if let model = anomalyModel, let verdict = anomalyVerdict {
+                HStack(spacing: 10) {
+                    Image(systemName: verdict.isAnomalous
+                          ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                        .font(.system(size: 18))
+                        .foregroundStyle(verdict.isAnomalous ? Theme.Palette.verdictAmber
+                                                             : Theme.Palette.verdictGreen)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(String(format: "Mahalanobis distance %.2f", verdict.distance))
+                            .font(Theme.Typography.numeric)
+                            .foregroundStyle(Theme.Palette.textPrimary)
+                        Text(String(format: "threshold %.2f", model.threshold))
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                    }
                 }
-            }
 
-            Text(verdict.explanation)
-                .font(Theme.Typography.callout)
-                .foregroundStyle(Theme.Palette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+                Text(verdict.explanation)
+                    .font(Theme.Typography.callout)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
 
-            // Which feature made it unusual matters more than the distance:
-            // "the period is odd" and "it is unusually cold" are different
-            // stories, and only one of them is about the building.
-            ForEach(Array(verdict.featureContributions.prefix(3).enumerated()),
-                    id: \.offset) { _, contribution in
-                HStack {
-                    Text(contribution.name)
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Palette.textSecondary)
-                    Spacer()
-                    Text(String(format: "%.0f%%", contribution.contribution * 100))
-                        .font(Theme.Typography.numericSmall)
-                        .foregroundStyle(Theme.Palette.textTertiary)
+                // Which feature made it unusual matters more than the distance:
+                // "the period is odd" and "it is unusually cold" are different
+                // stories, and only one of them is about the building.
+                ForEach(Array(verdict.featureContributions.prefix(3).enumerated()),
+                        id: \.offset) { _, contribution in
+                    HStack {
+                        Text(contribution.name)
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Palette.textSecondary)
+                        Spacer()
+                        Text(String(format: "%.0f%%", contribution.contribution * 100))
+                            .font(Theme.Typography.numericSmall)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                    }
                 }
+            } else {
+                Text("A year of measurements is needed before \"normal\" means anything for "
+                     + "this building. Until then there is nothing to compare against.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -599,6 +608,17 @@ struct AnalysisScreen: View {
         return out
     }
 
+    /// Fits "what normal looks like for this building" once per change in the
+    /// measurement history.
+    private func trainAnomalyModel() {
+        let history = ModeTracking.history(of: 1, in: env.observations)
+        let features = history.map { [$0.period, $0.temperature ?? 15] }
+        let model = AnomalyDetection.train(observations: features,
+                                           featureNames: ["Period", "Temperature"])
+        anomalyModel = model
+        anomalyVerdict = AnomalyDetection.evaluate(features.last ?? [], model: model)
+    }
+
     // MARK: Computing
 
     private func compute() async {
@@ -634,7 +654,13 @@ struct AnalysisScreen: View {
             let buffered = env.session.bufferedRecord()
             return buffered.z.samples.count > 256 ? buffered : nil
         case .lastEvent:
-            guard let event = env.events.first,
+            // This building's most recent event, not the app's. Analysing one
+            // building's spectrum while its name is shown against another's
+            // recording would be worse than showing nothing.
+            let candidates = env.selectedBuilding.map { building in
+                env.events.filter { $0.buildingID == building.id }
+            } ?? env.events
+            guard let event = candidates.first,
                   let stored = env.store.eventWithRecording(event.id)?.record else {
                 return nil
             }

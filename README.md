@@ -25,7 +25,7 @@ Requires Xcode 16 or later and iOS 17+.
 cd SeismicKit && swift test
 ```
 
-539 tests across seven modules. Every one of the fifty algorithms is tested
+555 tests across seven modules. Every one of the fifty algorithms is tested
 against a known input with an expected output, and every network client is
 tested against a stubbed transport — including the paths that fail, which are
 the ones that matter and the ones a live-network test would never reach

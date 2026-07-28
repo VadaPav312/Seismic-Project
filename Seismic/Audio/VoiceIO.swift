@@ -32,14 +32,27 @@ final class VoiceController: NSObject, ObservableObject {
     /// without being asked to.
     @Published var isVoiceControlEnabled = false {
         didSet {
+            guard !isRestoringSettings else { return }
             UserDefaults.standard.set(isVoiceControlEnabled, forKey: "voiceControlEnabled")
             if !isVoiceControlEnabled { stopListening() }
         }
     }
 
     @Published var speaksAutomatically = true {
-        didSet { UserDefaults.standard.set(speaksAutomatically, forKey: "speaksAutomatically") }
+        didSet {
+            guard !isRestoringSettings else { return }
+            UserDefaults.standard.set(speaksAutomatically, forKey: "speaksAutomatically")
+        }
     }
+
+    /// Set while `init` restores the stored settings.
+    ///
+    /// Without it, assigning the stored value fires `didSet`, which called
+    /// `stopListening`, which touched `audioEngine.inputNode` — and merely
+    /// touching that property instantiates the microphone's audio unit. The app
+    /// was therefore spinning up audio input on every launch, in a build where
+    /// voice control was switched off and nothing was listening.
+    private var isRestoringSettings = false
 
     private let speech: SpeechService
     private let synthesiser = AVSpeechSynthesizer()
@@ -51,6 +64,7 @@ final class VoiceController: NSObject, ObservableObject {
     private var recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
     private let audioEngine = AVAudioEngine()
+    private var hasInstalledTap = false
     #endif
 
     init(speech: SpeechService) {
@@ -58,8 +72,10 @@ final class VoiceController: NSObject, ObservableObject {
         super.init()
         synthesiser.delegate = self
         let defaults = UserDefaults.standard
+        isRestoringSettings = true
         isVoiceControlEnabled = defaults.bool(forKey: "voiceControlEnabled")
         speaksAutomatically = defaults.object(forKey: "speaksAutomatically") as? Bool ?? true
+        isRestoringSettings = false
     }
 
     // MARK: Speaking
@@ -207,10 +223,11 @@ final class VoiceController: NSObject, ObservableObject {
 
         let input = audioEngine.inputNode
         let format = input.outputFormat(forBus: 0)
-        input.removeTap(onBus: 0)
+        if hasInstalledTap { input.removeTap(onBus: 0) }
         input.installTap(onBus: 0, bufferSize: 1024, format: format) { buffer, _ in
             request.append(buffer)
         }
+        hasInstalledTap = true
 
         audioEngine.prepare()
         do {
@@ -243,7 +260,13 @@ final class VoiceController: NSObject, ObservableObject {
 
     func stopListening() {
         #if canImport(Speech)
-        audioEngine.inputNode.removeTap(onBus: 0)
+        // Only reach for the input node if a tap was actually installed:
+        // `inputNode` is lazy, and asking for it is enough to bring up the
+        // microphone's audio unit.
+        if hasInstalledTap {
+            audioEngine.inputNode.removeTap(onBus: 0)
+            hasInstalledTap = false
+        }
         if audioEngine.isRunning { audioEngine.stop() }
         recognitionRequest?.endAudio()
         recognitionTask?.cancel()

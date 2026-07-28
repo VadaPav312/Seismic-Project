@@ -23,6 +23,12 @@ struct SimulatorScreen: View {
     @State private var showsSweep = false
     @State private var showsComparison = false
     @State private var showsAR = false
+    /// Cached because `modeControls` is evaluated on every pass through `body`,
+    /// and the environment ticks at 20 Hz. Computing an eigendecomposition
+    /// twenty times a second to label three buttons that have not changed is
+    /// the sort of thing that makes a screen feel heavy for no visible reason.
+    @State private var cachedModes: [ModeShape] = []
+    @State private var cachedModesBuildingID: UUID?
     @StateObject private var sonifier = PeriodSonifier()
     @StateObject private var recorder = SceneRecorder()
     @State private var exportedImage: UIImage?
@@ -110,6 +116,14 @@ struct SimulatorScreen: View {
         guard let building else { return }
         controller.build(building, animated: false)
         runner.prepare(building: building)
+        refreshModes(for: building)
+    }
+
+    /// Recomputed only when the building actually changes.
+    private func refreshModes(for building: BuildingModel) {
+        guard cachedModesBuildingID != building.id || cachedModes.isEmpty else { return }
+        cachedModesBuildingID = building.id
+        cachedModes = ModalAnalysis.modes(of: ShearBuilding.from(building))
     }
 
     // MARK: Overlays
@@ -547,8 +561,8 @@ struct SimulatorScreen: View {
         VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
             SectionLabel("Mode shapes", systemImage: "waveform.path")
 
-            if let building {
-                let modes = ModalAnalysis.modes(of: ShearBuilding.from(building))
+            if building != nil {
+                let modes = cachedModes
                 HStack(spacing: 8) {
                     ForEach(modes.prefix(3)) { mode in
                         Button {
