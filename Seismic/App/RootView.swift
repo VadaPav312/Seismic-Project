@@ -5,7 +5,7 @@ import SeismicServices
 /// The top-level destinations.
 enum AppSection: String, CaseIterable, Identifiable, Hashable {
     case home, monitor, simulator, map, library, node, assess, feed
-    case prepare, household, settings
+    case prepare, household, network, shakeTable, settings
     var id: String { rawValue }
 
     var title: String {
@@ -20,6 +20,8 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .feed: "Feed"
         case .prepare: "Preparedness"
         case .household: "Household"
+        case .network: "Network"
+        case .shakeTable: "Shake table"
         case .settings: "Settings"
         }
     }
@@ -36,6 +38,8 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .feed: "globe.americas"
         case .prepare: "checklist"
         case .household: "person.3"
+        case .network: "point.3.connected.trianglepath.dotted"
+        case .shakeTable: "slider.horizontal.below.rectangle"
         case .settings: "gearshape"
         }
     }
@@ -43,8 +47,8 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
     /// The five that get a tab. The rest are reached from Home and from the
     /// More menu — a bar of nine icons is a bar nobody can use in a hurry.
     static let primary: [AppSection] = [.home, .monitor, .simulator, .map, .library]
-    static let secondary: [AppSection] = [.assess, .node, .feed, .prepare,
-                                         .household, .settings]
+    static let secondary: [AppSection] = [.assess, .node, .feed, .prepare, .household,
+                                         .network, .shakeTable, .settings]
 }
 
 struct RootView: View {
@@ -200,6 +204,8 @@ struct RootView: View {
         case .feed: GlobalFeedScreen()
         case .prepare: PreparednessScreen()
         case .household: HouseholdScreen()
+        case .network: NetworkScreen()
+        case .shakeTable: ShakeTableScreen()
         case .settings: SettingsScreen()
         }
     }
@@ -248,5 +254,5 @@ struct LaunchView: View {
 }
 
 #Preview {
-    RootView().environmentObject(AppEnvironment.preview())
+    RootView().previewEnvironment()
 }

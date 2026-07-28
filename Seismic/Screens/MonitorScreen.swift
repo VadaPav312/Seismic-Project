@@ -249,6 +249,5 @@ struct MonitorScreen: View {
             .seismicBackground()
             .navigationTitle("Monitor")
     }
-    .environmentObject(AppEnvironment.preview())
-    .preferredColorScheme(.dark)
+    .previewEnvironment()
 }

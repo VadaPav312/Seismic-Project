@@ -27,6 +27,8 @@ final class AppEnvironment: ObservableObject {
     /// degrades independently: the app has to work with all of it switched off.
     let services: ServiceHub
     let voice: VoiceController
+    /// The Lock Screen and the home-screen widget.
+    let live = LiveActivityController()
 
     /// How many credentials were found in `.env` at first launch. Surfaced once,
     /// in Settings, and never as a prompt — the app owes the user a working
@@ -138,6 +140,7 @@ final class AppEnvironment: ObservableObject {
 
         bootstrapStage = "Ready"
         isBootstrapped = true
+        publishWidgetState()
 
         // Everything after this point is optional and happens off the launch
         // path, so a slow network can never delay the first frame.
@@ -308,6 +311,10 @@ final class AppEnvironment: ObservableObject {
                                   expectedIntensity: intensity,
                                   isDrill: false)
 
+        live.start(buildingName: selectedBuilding?.name ?? "Your building",
+                   secondsUntilShaking: seconds, magnitude: magnitude,
+                   intensity: intensity, isDrill: false)
+
         // Spoken immediately, and deliberately not routed through the analyst:
         // this sentence is fixed, pre-rendered and available offline, because
         // it is the one sentence that must never wait for anything.
@@ -338,6 +345,16 @@ final class AppEnvironment: ObservableObject {
             return
         }
         activeEvent = event
+
+        let confirmed = event.actuators.values.filter { $0.state == .confirmed }.count
+        live.update(stage: (event.secondsUntilStrongShaking ?? 0) > 1 ? .warning : .shaking,
+                    secondsUntilShaking: event.secondsUntilStrongShaking,
+                    magnitude: event.estimatedMagnitude,
+                    intensity: event.expectedIntensity,
+                    verdict: nil,
+                    actuatorsFired: event.actuators.count,
+                    actuatorsConfirmed: confirmed,
+                    isDrill: event.isDrill)
     }
 
     func acknowledgeActiveEvent() {
@@ -345,7 +362,22 @@ final class AppEnvironment: ObservableObject {
         Haptics.shared.play(.selection)
     }
 
-    func dismissActiveEvent() { activeEvent = nil }
+    func dismissActiveEvent() {
+        activeEvent = nil
+        live.end()
+    }
+
+    /// Pushes the current state out to the home-screen widget.
+    ///
+    /// Called at launch and after anything that changes what the widget shows,
+    /// so a glance at the Home Screen is never looking at last week's verdict.
+    func publishWidgetState() {
+        live.publish(building: selectedBuilding,
+                     assessment: latestAssessment,
+                     isConnected: connectionState.isLive,
+                     isSimulated: isUsingSimulatedData,
+                     lastEventAt: events.first?.startTime)
+    }
 
     /// Runs the warning sequence without firing anything — the drill.
     func startDrill(fireActuators: Bool) {
@@ -355,6 +387,9 @@ final class AppEnvironment: ObservableObject {
                                   expectedIntensity: .strong,
                                   isDrill: true)
         session.send(.drill(fireActuators: fireActuators))
+        live.start(buildingName: selectedBuilding?.name ?? "Your building",
+                   secondsUntilShaking: 9, magnitude: 6.1,
+                   intensity: .strong, isDrill: true)
         Haptics.shared.play(.eventTriggered)
     }
 
@@ -417,6 +452,8 @@ final class AppEnvironment: ObservableObject {
                                 : (assessment.verdict == .red ? .verdictRed : .verdictAmber))
 
             voice.speak(assessment.verdict.plainMeaning, urgency: .calm)
+            live.finish(verdict: assessment.verdict, buildingName: building.name)
+            publishWidgetState()
             Task { await services.narrative(for: assessment, building: building) }
         }
     }

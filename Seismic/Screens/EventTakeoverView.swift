@@ -240,7 +240,7 @@ struct EventTakeoverView: View {
                                    secondsUntilStrongShaking: 11,
                                    expectedIntensity: .strong,
                                    isDrill: false))
-        .environmentObject(AppEnvironment.preview())
+        .previewEnvironment()
 }
 
 #Preview("Shaking") {
@@ -255,5 +255,5 @@ struct EventTakeoverView: View {
                                     .mainsPower: .init(kind: .mainsPower, state: .confirmed),
                                     .waterMain: .init(kind: .waterMain, state: .inProgress),
                                    ]))
-        .environmentObject(AppEnvironment.preview())
+        .previewEnvironment()
 }

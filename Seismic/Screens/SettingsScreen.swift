@@ -495,6 +495,5 @@ struct GlossaryScreen: View {
     NavigationStack {
         SettingsScreen().navigationTitle("Settings")
     }
-    .environmentObject(AppEnvironment.preview())
-    .preferredColorScheme(.dark)
+    .previewEnvironment()
 }

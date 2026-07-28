@@ -423,6 +423,5 @@ struct CheckInSheet: View {
             .seismicBackground()
             .navigationTitle("Home")
     }
-    .environmentObject(AppEnvironment.preview())
-    .preferredColorScheme(.dark)
+    .previewEnvironment()
 }

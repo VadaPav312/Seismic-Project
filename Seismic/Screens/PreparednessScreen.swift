@@ -368,6 +368,5 @@ private struct PreparednessRow: View {
             .seismicBackground()
             .navigationTitle("Preparedness")
     }
-    .environmentObject(AppEnvironment.preview())
-    .preferredColorScheme(.dark)
+    .previewEnvironment()
 }

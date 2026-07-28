@@ -2,6 +2,7 @@ import SwiftUI
 import SeismicCore
 import SeismicStructures
 import SeismicData
+import SeismicServices
 
 /// Building search and import.
 ///
@@ -16,6 +17,7 @@ struct BuildingImportSheet: View {
     @EnvironmentObject private var env: AppEnvironment
     @Environment(\.dismiss) private var dismiss
 
+    @EnvironmentObject private var services: ServiceHub
     @StateObject private var importer = BuildingImporter()
     @State private var query = ""
     @StateObject private var controller = BuildingSceneController()
@@ -46,8 +48,9 @@ struct BuildingImportSheet: View {
                             title: "Nothing found",
                             message: message,
                             actionTitle: "Try the bundled library",
-                            action: { importer.searchBundled(query: query,
-                                                             library: env.buildings) })
+                            action: { Task { await importer.searchBundled(query: query,
+                                                                          service: services.search,
+                                                                          library: env.buildings) } })
                     }
                 }
                 .padding(Theme.Metrics.screenPadding)
@@ -135,7 +138,7 @@ struct BuildingImportSheet: View {
 
             ForEach(candidates) { candidate in
                 Button {
-                    importer.select(candidate)
+                    Task { await importer.select(candidate, service: services.search) }
                 } label: {
                     HStack(spacing: Theme.Metrics.spacing) {
                         ZStack {
@@ -227,9 +230,8 @@ struct BuildingImportSheet: View {
 
     private func search() {
         guard !query.isEmpty else { return }
-        importer.search(query: query, library: env.buildings,
-                        hasLiveSearch: env.secrets.has(.serperAPIKey)
-                            || env.secrets.has(.tavilyAPIKey))
+        Task { await importer.search(query: query, service: services.search,
+                                     library: env.buildings) }
     }
 }
 
@@ -244,7 +246,11 @@ final class BuildingImporter: ObservableObject {
         let description: String
         let relevance: Double
         let systemImage: String
-        let building: BuildingModel
+        /// What the retrieval layer returned.
+        let remote: BuildingCandidate
+        /// The bundled library's version of the same building, when there is
+        /// one. Used to keep the richer description rather than overwrite it.
+        let building: BuildingModel?
     }
 
     enum Stage {
@@ -260,107 +266,120 @@ final class BuildingImporter: ObservableObject {
     @Published private(set) var progress: Double = 0
     @Published private(set) var sourceDescription = ""
     @Published private(set) var narration: [String] = []
+    @Published private(set) var origin: ResultOrigin = .seeded
 
-    private var engine = BM25<UUID>()
-
-    func search(query: String, library: [BuildingModel], hasLiveSearch: Bool) {
+    /// Searches for real.
+    ///
+    /// The service tries Wikidata first — which needs no key, so this path is
+    /// live on a fresh install — then the keyed providers, and finally the
+    /// bundled library. Whichever answered is reported, because a user deciding
+    /// whether to trust a height needs to know whether it came from a database
+    /// or from a paragraph of prose.
+    func search(query: String, service: BuildingSearchService,
+                library: [BuildingModel]) async {
         stage = .searching
-        sourceDescription = hasLiveSearch
-            ? "Querying search providers and Wikidata…"
+        sourceDescription = service.hasLivePath
+            ? "Querying Wikidata and any configured search providers…"
             : "Searching the bundled reference library…"
 
-        // The ranking is real BM25 over the library, not a substring match, so
-        // "iron tower paris" finds the Eiffel Tower.
-        let reference = library + SeedLibrary.buildings()
-        var seen = Set<UUID>()
-        let unique = reference.filter { seen.insert($0.id).inserted }
+        let result = await service.search(query)
+        origin = result.origin
+        sourceDescription = "\(result.origin.label) · \(result.provider)"
 
-        engine.index(unique.map { building in
-            BM25<UUID>.Document(id: building.id,
-                                text: [building.name, building.address, building.notes,
-                                       building.material.label, building.system.label,
-                                       building.architect ?? ""].joined(separator: " "))
-        })
-
-        let ranked = engine.search(query, limit: 6)
-        var candidates: [Candidate] = ranked.compactMap { result in
-            guard let building = unique.first(where: { $0.id == result.id }) else { return nil }
-            return Candidate(name: building.name,
-                             location: building.address.isEmpty ? "Location unknown"
-                                                                : building.address,
-                             description: String(building.notes.prefix(110)),
-                             relevance: min(result.score / 12, 1),
-                             systemImage: building.thumbnailSystemImage,
-                             building: building)
-        }
-
-        // Fuzzy fallback, so a misspelling still finds something rather than
-        // dead-ending.
-        if candidates.isEmpty {
-            let fuzzy = unique
-                .map { ($0, FuzzyMatch.combinedSimilarity(query, $0.name)) }
-                .filter { $0.1 > 0.35 }
-                .sorted { $0.1 > $1.1 }
-                .prefix(4)
-            candidates = fuzzy.map { building, score in
-                Candidate(name: building.name,
-                          location: building.address.isEmpty ? "Location unknown" : building.address,
-                          description: String(building.notes.prefix(110)),
-                          relevance: score,
-                          systemImage: building.thumbnailSystemImage,
-                          building: building)
-            }
+        let candidates = result.value.map { candidate in
+            Candidate(name: candidate.name,
+                      location: candidate.subtitle.isEmpty ? "Location unknown"
+                                                           : candidate.subtitle,
+                      description: String(candidate.snippet.prefix(110)),
+                      relevance: candidate.confidence,
+                      systemImage: "building.2",
+                      remote: candidate,
+                      building: library.first { $0.name == candidate.name })
         }
 
         guard !candidates.isEmpty else {
-            stage = .failed("Nothing in the reference library matches “\(query)”. Try a "
-                            + "well-known building, or build one by hand from the library screen.")
+            stage = .failed(result.note
+                            ?? "Nothing matched “\(query)”. Try a well-known building, or build "
+                             + "one by hand from the library screen.")
             return
         }
 
+        // One confident match is not a question worth asking.
         if candidates.count == 1 {
-            select(candidates[0])
+            await select(candidates[0], service: service)
         } else {
             stage = .disambiguating(candidates)
         }
     }
 
-    func searchBundled(query: String, library: [BuildingModel]) {
-        search(query: query, library: library, hasLiveSearch: false)
+    func searchBundled(query: String, service: BuildingSearchService,
+                       library: [BuildingModel]) async {
+        await search(query: query, service: service, library: library)
     }
 
-    func select(_ candidate: Candidate) {
+    /// Gathers the facts and assembles the model, narrating each step.
+    ///
+    /// The narration is the point of this screen. A building that appears
+    /// instantly teaches nothing; one that says "height from Wikidata, footprint
+    /// from OpenStreetMap, mass assumed at 500 kg per square metre" tells the
+    /// user exactly how much of what they are looking at is known.
+    func select(_ candidate: Candidate, service: BuildingSearchService) async {
         stage = .gathering(candidate)
         progress = 0
         narration = []
 
-        // The stages are stepped through visibly rather than instantly, because
-        // the point is to show the pipeline — what was found, from where, and
-        // what was assumed. A result that appears instantly teaches nothing.
-        let steps: [(Double, String, String)] = [
-            (0.2, "Resolving the building", "Matched to a reference record."),
-            (0.4, "Gathering facts",
-             factsNarration(candidate.building)),
-            (0.6, "Fetching geometry",
-             geometryNarration(candidate.building)),
-            (0.8, "Deriving structural properties",
-             structuralNarration(candidate.building)),
-            (1.0, "Assembling", "Building it storey by storey."),
-        ]
+        progress = 0.25
+        sourceDescription = "Gathering facts"
+        let facts = await service.facts(for: candidate.remote)
+        origin = facts.origin
 
-        for (index, step) in steps.enumerated() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + Double(index) * 0.5) { [weak self] in
-                guard let self else { return }
-                progress = step.0
-                sourceDescription = step.1
-                narration.append(step.2)
-                if index == steps.count - 1 {
-                    var building = candidate.building
-                    building.id = UUID()
-                    building.isSandbox = false
-                    stage = .assembled(building)
-                }
+        if facts.value.isEmpty {
+            narration.append(facts.note ?? "Nothing was retrieved for this one.")
+        } else {
+            for (field, fact) in facts.value.facts.sorted(by: { $0.key < $1.key }) {
+                narration.append("\(Self.label(for: field)): \(fact.value) "
+                                 + "— \(fact.provenance.source.label)"
+                                 + (fact.provenance.detail.map { ", \($0.lowercased())" } ?? ""))
             }
+        }
+
+        progress = 0.6
+        sourceDescription = "Assembling the model"
+        var building = service.compose(candidate: candidate.remote, facts: facts.value)
+
+        // A bundled match keeps the library's richer description and any
+        // structural detail the retrieval could not supply.
+        if let known = candidate.building {
+            building.notes = known.notes.isEmpty ? building.notes : known.notes
+            building.system = facts.value["system"] == nil ? known.system : building.system
+            building.soil = known.soil
+            building.retrofit = facts.value["retrofit"] == nil ? known.retrofit : building.retrofit
+            building.notableEvents = known.notableEvents
+        }
+
+        narration.append(geometryNarration(building))
+        progress = 0.85
+        narration.append(structuralNarration(building))
+
+        building.id = UUID()
+        building.isSandbox = false
+        progress = 1
+        stage = .assembled(building)
+    }
+
+    private static func label(for field: String) -> String {
+        switch field {
+        case "storeyCount": "Storeys"
+        case "height": "Height"
+        case "yearBuilt": "Year built"
+        case "footprintArea": "Footprint area"
+        case "footprint": "Footprint outline"
+        case "material": "Material"
+        case "system": "Structural system"
+        case "architect": "Architect"
+        case "address": "Address"
+        case "latitude", "longitude": "Position"
+        default: field.capitalizedFirstLetter
         }
     }
 
@@ -401,6 +420,5 @@ private extension String {
 
 #Preview {
     BuildingImportSheet()
-        .environmentObject(AppEnvironment.preview())
-        .preferredColorScheme(.dark)
+        .previewEnvironment()
 }

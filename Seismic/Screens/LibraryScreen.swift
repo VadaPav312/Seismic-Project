@@ -258,6 +258,5 @@ struct BuildingDetailSheet: View {
             .seismicBackground()
             .navigationTitle("Library")
     }
-    .environmentObject(AppEnvironment.preview())
-    .preferredColorScheme(.dark)
+    .previewEnvironment()
 }

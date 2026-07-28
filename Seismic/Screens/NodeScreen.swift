@@ -605,6 +605,5 @@ struct AlgorithmCatalogScreen: View {
             .seismicBackground()
             .navigationTitle("Node")
     }
-    .environmentObject(AppEnvironment.preview())
-    .preferredColorScheme(.dark)
+    .previewEnvironment()
 }

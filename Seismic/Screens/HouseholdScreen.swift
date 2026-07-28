@@ -565,7 +565,5 @@ enum QRCode {
             .seismicBackground()
             .navigationTitle("Household")
     }
-    .environmentObject(AppEnvironment.preview())
-    .environmentObject(AppEnvironment.preview().services)
-    .preferredColorScheme(.dark)
+    .previewEnvironment()
 }

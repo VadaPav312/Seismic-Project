@@ -347,6 +347,5 @@ struct MapFilterSheet: View {
         CommunityMapScreen()
             .navigationTitle("Map")
     }
-    .environmentObject(AppEnvironment.preview())
-    .preferredColorScheme(.dark)
+    .previewEnvironment()
 }

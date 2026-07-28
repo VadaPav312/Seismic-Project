@@ -417,6 +417,5 @@ private struct FirstImportStep: View {
 
 #Preview {
     OnboardingFlow()
-        .environmentObject(AppEnvironment.preview())
-        .preferredColorScheme(.dark)
+        .previewEnvironment()
 }

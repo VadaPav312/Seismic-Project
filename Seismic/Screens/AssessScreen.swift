@@ -544,6 +544,5 @@ extension URL: @retroactive Identifiable {
             .seismicBackground()
             .navigationTitle("Assess")
     }
-    .environmentObject(AppEnvironment.preview())
-    .preferredColorScheme(.dark)
+    .previewEnvironment()
 }

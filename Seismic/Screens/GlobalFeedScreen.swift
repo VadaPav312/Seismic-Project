@@ -221,6 +221,5 @@ final class EarthquakeFeed: ObservableObject {
             .seismicBackground()
             .navigationTitle("Feed")
     }
-    .environmentObject(AppEnvironment.preview())
-    .preferredColorScheme(.dark)
+    .previewEnvironment()
 }

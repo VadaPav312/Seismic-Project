@@ -8,14 +8,60 @@
 
 /* Begin PBXBuildFile section */
 		AA00000000000000000001 /* SeismicKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000000000000000002 /* SeismicKit */; };
+		AA00000000000000000021 /* SeismicKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000000000000000020 /* SeismicKit */; };
+		AA0000000000000000001D /* SeismicWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = AA00000000000000000013 /* SeismicWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		AA0000000000000000001F /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = AA0000000000000000000C /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = AA00000000000000000015;
+			remoteInfo = SeismicWidgets;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		AA0000000000000000001C /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				AA0000000000000000001D /* SeismicWidgets.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
 		AA00000000000000000003 /* Seismic.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Seismic.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA00000000000000000013 /* SeismicWidgets.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = SeismicWidgets.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
+/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
+		AA00000000000000000022 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Info.plist,
+				SeismicWidgets.entitlements,
+			);
+			target = AA00000000000000000015 /* SeismicWidgets */;
+		};
+		AA00000000000000000023 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				Seismic.entitlements,
+			);
+			target = AA00000000000000000008 /* Seismic */;
+		};
+/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
+
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		AA00000000000000000004 /* Seismic */ = {isa = PBXFileSystemSynchronizedRootGroup; path = Seismic; sourceTree = "<group>"; };
+		AA00000000000000000004 /* Seismic */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (AA00000000000000000023 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); path = Seismic; sourceTree = "<group>"; };
+		AA00000000000000000014 /* SeismicWidgets */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (AA00000000000000000022 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); path = SeismicWidgets; sourceTree = "<group>"; };
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -27,6 +73,14 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AA0000000000000000001A /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				AA00000000000000000021 /* SeismicKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -34,6 +88,7 @@
 			isa = PBXGroup;
 			children = (
 				AA00000000000000000004 /* Seismic */,
+				AA00000000000000000014 /* SeismicWidgets */,
 				AA00000000000000000007 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -42,6 +97,7 @@
 			isa = PBXGroup;
 			children = (
 				AA00000000000000000003 /* Seismic.app */,
+				AA00000000000000000013 /* SeismicWidgets.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -56,10 +112,12 @@
 				AA0000000000000000000A /* Sources */,
 				AA00000000000000000005 /* Frameworks */,
 				AA0000000000000000000B /* Resources */,
+				AA0000000000000000001C /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				AA0000000000000000001E /* PBXTargetDependency */,
 			);
 			fileSystemSynchronizedGroups = (
 				AA00000000000000000004 /* Seismic */,
@@ -72,6 +130,29 @@
 			productReference = AA00000000000000000003 /* Seismic.app */;
 			productType = "com.apple.product-type.application";
 		};
+		AA00000000000000000015 /* SeismicWidgets */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA00000000000000000016 /* Build configuration list for PBXNativeTarget "SeismicWidgets" */;
+			buildPhases = (
+				AA00000000000000000019 /* Sources */,
+				AA0000000000000000001A /* Frameworks */,
+				AA0000000000000000001B /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			fileSystemSynchronizedGroups = (
+				AA00000000000000000014 /* SeismicWidgets */,
+			);
+			name = SeismicWidgets;
+			packageProductDependencies = (
+				AA00000000000000000020 /* SeismicKit */,
+			);
+			productName = SeismicWidgets;
+			productReference = AA00000000000000000013 /* SeismicWidgets.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -83,6 +164,9 @@
 				LastUpgradeCheck = 2660;
 				TargetAttributes = {
 					AA00000000000000000008 = {
+						CreatedOnToolsVersion = 26.0;
+					};
+					AA00000000000000000015 = {
 						CreatedOnToolsVersion = 26.0;
 					};
 				};
@@ -105,12 +189,20 @@
 			projectRoot = "";
 			targets = (
 				AA00000000000000000008 /* Seismic */,
+				AA00000000000000000015 /* SeismicWidgets */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		AA0000000000000000000B /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AA0000000000000000001B /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
@@ -127,7 +219,22 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		AA00000000000000000019 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		AA0000000000000000001E /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = AA00000000000000000015 /* SeismicWidgets */;
+			targetProxy = AA0000000000000000001F /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		AA0000000000000000000F /* Debug */ = {
@@ -190,6 +297,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Seismic/Seismic.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
@@ -230,6 +338,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = Seismic/Seismic.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
@@ -265,6 +374,57 @@
 			};
 			name = Release;
 		};
+		AA00000000000000000017 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = SeismicWidgets/SeismicWidgets.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SeismicWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.seismic.ios.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		AA00000000000000000018 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
+				CODE_SIGN_ENTITLEMENTS = SeismicWidgets/SeismicWidgets.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = SeismicWidgets/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = app.seismic.ios.widgets;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				SWIFT_COMPILATION_MODE = wholemodule;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -286,6 +446,15 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		AA00000000000000000016 /* Build configuration list for PBXNativeTarget "SeismicWidgets" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				AA00000000000000000017 /* Debug */,
+				AA00000000000000000018 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
@@ -297,6 +466,10 @@
 
 /* Begin XCSwiftPackageProductDependency section */
 		AA00000000000000000002 /* SeismicKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = SeismicKit;
+		};
+		AA00000000000000000020 /* SeismicKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			productName = SeismicKit;
 		};

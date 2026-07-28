@@ -638,6 +638,5 @@ final class SimulationRunner: ObservableObject {
             .navigationTitle("Simulator")
             .navigationBarTitleDisplayMode(.inline)
     }
-    .environmentObject(AppEnvironment.preview())
-    .preferredColorScheme(.dark)
+    .previewEnvironment()
 }
