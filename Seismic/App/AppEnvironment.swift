@@ -161,16 +161,40 @@ final class AppEnvironment: ObservableObject {
         reloadFromStore(store.snapshot())
     }
 
+    /// Puts the bundled example library back.
+    ///
+    /// Deleting everything is honest — it really does remove the lot — but an
+    /// app with no buildings in it has nothing to show and no obvious way
+    /// forward. This is the way back, offered wherever that emptiness is
+    /// visible rather than hidden in Settings.
+    func restoreSeedLibrary() {
+        store.seed()
+        refresh()
+        selectedBuildingID = buildings.first(where: \.isSandbox)?.id ?? buildings.first?.id
+        attachSimulatedNode()
+        publishWidgetState()
+        Haptics.shared.play(.assessmentComplete)
+    }
+
     /// `.env` is read from the app bundle if it was copied in at build time, and
     /// otherwise from the documents directory, which is where a developer can
     /// drop one onto a device without rebuilding.
     static var bundledEnvFileURL: URL? {
-        if let bundled = Bundle.main.url(forResource: ".env", withExtension: nil) { return bundled }
-        if let bundled = Bundle.main.url(forResource: "env", withExtension: nil) { return bundled }
-        let documents = FileManager.default.urls(for: .documentDirectory,
-                                                 in: .userDomainMask).first
-        let candidate = documents?.appendingPathComponent(".env")
-        if let candidate, FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+        let manager = FileManager.default
+
+        // Copied in by a debug-only build phase from the repository root.
+        // `Bundle.url(forResource:)` is unreliable for a name that begins with
+        // a dot, so the bundle directory is searched directly.
+        let bundled = Bundle.main.bundleURL.appendingPathComponent(".env")
+        if manager.fileExists(atPath: bundled.path) { return bundled }
+        if let named = Bundle.main.url(forResource: "env", withExtension: nil) { return named }
+
+        // And the documents directory, which is how a `.env` gets onto a real
+        // device — through the Files app — without rebuilding.
+        if let documents = manager.urls(for: .documentDirectory, in: .userDomainMask).first {
+            let candidate = documents.appendingPathComponent(".env")
+            if manager.fileExists(atPath: candidate.path) { return candidate }
+        }
         return nil
     }
 

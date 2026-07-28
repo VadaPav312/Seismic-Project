@@ -527,8 +527,23 @@ public enum PeriodEstimation {
         public var agreement: Double          // 0…1
         public var explanation: String
 
-        public var methodsAgreeing: Int {
+        /// How many methods produced an answer at all.
+        public var methodsAnswering: Int {
             [spectral, autocorrelation, zeroCrossing].compactMap { $0 }.count
+        }
+
+        /// How many landed within 10% of the consensus.
+        ///
+        /// Distinct from `methodsAnswering`, which merely counts who spoke —
+        /// three methods answering with three different numbers is not
+        /// agreement, and reporting it as such was the point of the bug this
+        /// separation fixes.
+        public var methodsAgreeing: Int {
+            guard let consensus, consensus > 0 else { return 0 }
+            return [spectral, autocorrelation, zeroCrossing]
+                .compactMap { $0 }
+                .filter { abs($0 - consensus) / consensus <= 0.10 }
+                .count
         }
 
         public init(spectral: Double?, autocorrelation: Double?, zeroCrossing: Double?,
@@ -573,12 +588,28 @@ public enum PeriodEstimation {
         let consensus = Stats.median(estimates)
         let spread = estimates.count > 1
             ? (estimates.max()! - estimates.min()!) / consensus : 0
-        let agreement = Swift.max(0, 1 - spread * 2)
+
+        // Agreement cannot exceed what the number of *independent* checks
+        // supports. Deriving it from spread alone meant a single surviving
+        // estimate had a spread of zero and therefore scored a perfect 1.0 —
+        // so a record of pure noise, where two of the three methods decline to
+        // answer at all, read as "all methods agree, this measurement is
+        // solid". One method cannot corroborate itself.
+        let closeness = Swift.max(0, 1 - spread * 2)
+        let corroborationCeiling: Double
+        switch estimates.count {
+        case 1: corroborationCeiling = 0.35
+        case 2: corroborationCeiling = 0.80
+        default: corroborationCeiling = 1.00
+        }
+        let agreement = Swift.min(closeness, corroborationCeiling)
 
         let explanation: String
         switch (estimates.count, agreement) {
         case (1, _):
-            explanation = "Only one method could measure a period, so this figure is unconfirmed."
+            explanation = "Only one of the three methods could measure a period at all, so this "
+                + "figure is unconfirmed. Two methods that fail differently agreeing is the "
+                + "cheapest evidence available that a period is real."
         case (_, 0.85...):
             explanation = "All methods agree to within \(String(format: "%.1f", spread * 100))%. "
                 + "This measurement is solid."

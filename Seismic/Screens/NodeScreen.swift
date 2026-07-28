@@ -1,5 +1,6 @@
 import SwiftUI
 import SeismicCore
+import SeismicSignal
 import SeismicDevice
 
 /// Hardware status, actuators, diagnostics and the power budget.
@@ -14,6 +15,7 @@ struct NodeScreen: View {
                 actuatorConsole
                 powerBudget
                 sensors
+                corroboration
                 diagnostics
                 demoControls
                 logView
@@ -225,6 +227,68 @@ struct NodeScreen: View {
                        tint: neutral ? Theme.Palette.textSecondary
                            : (good ? Theme.Palette.verdictGreen : Theme.Palette.verdictAmber))
         }
+    }
+
+    /// Why the node believed it.
+    ///
+    /// A single accelerometer crossing a threshold is not evidence — a slammed
+    /// door does that. The node only accepts a trigger when independent
+    /// channels agree, and this is where that vote is shown, including the
+    /// channels that dissented. A system that fires the gas valve on one
+    /// sensor's opinion is a system nobody will leave switched on.
+    private var corroboration: some View {
+        let votes = env.nodeSnapshot?.votes ?? []
+        let decision = SensorFusion.vote(votes)
+
+        return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+            SectionLabel("Corroboration", systemImage: "person.3.sequence",
+                         trailing: votes.isEmpty ? "No vote yet"
+                                                 : (decision.accepted ? "Accepted" : "Rejected"))
+
+            if votes.isEmpty {
+                Text("Nothing has triggered, so there is no vote to show. After an event this "
+                     + "lists every channel that agreed and every one that did not.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                HStack(spacing: 10) {
+                    Image(systemName: decision.accepted
+                          ? "checkmark.shield.fill" : "xmark.shield.fill")
+                        .font(.system(size: 18))
+                        .foregroundStyle(decision.accepted ? Theme.Palette.verdictAmber
+                                                           : Theme.Palette.textSecondary)
+                    Text(decision.explanation)
+                        .font(Theme.Typography.callout)
+                        .foregroundStyle(Theme.Palette.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                ForEach(votes) { vote in
+                    HStack(spacing: 8) {
+                        Image(systemName: vote.agreed ? "checkmark.circle.fill" : "circle")
+                            .font(.system(size: 12))
+                            .foregroundStyle(vote.agreed ? Theme.Palette.accent
+                                                         : Theme.Palette.textTertiary)
+                        Text(vote.channel.label)
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Palette.textSecondary)
+                        Spacer()
+                        Text(String(format: "%.2f", vote.value))
+                            .font(Theme.Typography.numericSmall)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                    }
+                }
+
+                Readout(label: "Confidence",
+                        value: String(format: "%.0f", decision.confidence * 100), unit: "%",
+                        size: .small,
+                        caption: "\(decision.agreeing.count) agreeing, "
+                               + "\(decision.dissenting.count) dissenting")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .instrumentPanel()
     }
 
     // MARK: Diagnostics

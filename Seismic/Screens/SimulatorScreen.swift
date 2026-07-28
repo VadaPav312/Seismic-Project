@@ -41,12 +41,27 @@ struct SimulatorScreen: View {
 
     var body: some View {
         ZStack(alignment: .bottom) {
-            BuildingSceneView(controller: controller)
-                .ignoresSafeArea(edges: .bottom)
-                .overlay(alignment: .topLeading) { overlayReadouts }
-                .overlay(alignment: .topTrailing) { styleControls }
+            if building == nil {
+                // Reachable by deleting everything from Settings. An empty 3D
+                // scene with no explanation is the dead end this avoids.
+                DesignedEmptyState(
+                    icon: "cube.transparent",
+                    title: "No building to shake",
+                    message: "The simulator needs a building. Restore the bundled examples — "
+                           + "ten real buildings and ten real earthquake records — or import "
+                           + "one by name.",
+                    actionTitle: "Restore the example library",
+                    action: { env.restoreSeedLibrary() })
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .seismicBackground()
+            } else {
+                BuildingSceneView(controller: controller)
+                    .ignoresSafeArea(edges: .bottom)
+                    .overlay(alignment: .topLeading) { overlayReadouts }
+                    .overlay(alignment: .topTrailing) { styleControls }
 
-            controlPanel
+                controlPanel
+            }
         }
         .onAppear { setUp() }
         .onDisappear { sonifier.stop() }

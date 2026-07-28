@@ -93,6 +93,17 @@ struct SettingsScreen: View {
                 } label: {
                     Label("Delete all data", systemImage: "trash")
                 }
+
+                // Offered whenever the app has been emptied, so deleting
+                // everything is a reversible decision about *your* data rather
+                // than a way to end up with an app that does nothing.
+                if env.buildings.isEmpty {
+                    Button {
+                        env.restoreSeedLibrary()
+                    } label: {
+                        Label("Restore the example library", systemImage: "arrow.clockwise")
+                    }
+                }
             }
 
             Section {

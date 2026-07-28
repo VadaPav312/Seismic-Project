@@ -109,6 +109,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = AA00000000000000000009 /* Build configuration list for PBXNativeTarget "Seismic" */;
 			buildPhases = (
+				AA00000000000000000024 /* Copy .env for development */,
 				AA0000000000000000000A /* Sources */,
 				AA00000000000000000005 /* Frameworks */,
 				AA0000000000000000000B /* Resources */,
@@ -210,6 +211,26 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		AA00000000000000000024 /* Copy .env for development */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+				"$(SRCROOT)/.env",
+			);
+			name = "Copy .env for development";
+			outputPaths = (
+				"$(TARGET_BUILD_DIR)/$(UNLOCALIZED_RESOURCES_FOLDER_PATH)/.env",
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Puts a developer's .env inside the app so the vault can read it on\n# first launch. Debug only: a release build must never carry secrets,\n# and any stale copy from a previous debug build is removed.\nDEST=\"$TARGET_BUILD_DIR/$UNLOCALIZED_RESOURCES_FOLDER_PATH/.env\"\nif [ \"$CONFIGURATION\" = \"Debug\" ] && [ -f \"$SRCROOT/.env\" ]; then\n  cp \"$SRCROOT/.env\" \"$DEST\"\n  echo \"note: copied .env into the app bundle for development\"\nelse\n  rm -f \"$DEST\"\nfi\n";
+		};
+/* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
 		AA0000000000000000000A /* Sources */ = {

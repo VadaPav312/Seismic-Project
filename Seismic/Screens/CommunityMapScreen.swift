@@ -25,6 +25,9 @@ struct CommunityMapScreen: View {
     @State private var showingFilters = false
     @State private var selected: CommunityTag?
     @State private var timeSliderHours: Double = 72
+    /// Roughly how wide the visible map is, kept so the cluster cell size can
+    /// follow the zoom rather than being fixed.
+    @State private var visibleSpanMetres: Double = 5_000
 
     struct MapFilters {
         var verdicts: Set<SafetyVerdict> = Set(SafetyVerdict.allCases)
@@ -54,11 +57,29 @@ struct CommunityMapScreen: View {
     var body: some View {
         ZStack(alignment: .top) {
             Map(position: $position) {
-                ForEach(visibleTags) { tag in
-                    Annotation(tag.buildingLabel,
-                               coordinate: CLLocationCoordinate2D(latitude: tag.latitude,
-                                                                  longitude: tag.longitude)) {
-                        TagMarker(tag: tag) { selected = tag }
+                ForEach(clusters) { cluster in
+                    Annotation(cluster.isSingle
+                               ? (cluster.items.first?.buildingLabel ?? "")
+                               : "\(cluster.count) buildings",
+                               coordinate: CLLocationCoordinate2D(
+                                latitude: cluster.centre.latitude,
+                                longitude: cluster.centre.longitude)) {
+                        if cluster.isSingle, let tag = cluster.items.first {
+                            TagMarker(tag: tag) { selected = tag }
+                        } else {
+                            ClusterMarker(cluster: cluster) {
+                                // Zooming in is what a cluster is *for*: it
+                                // splits as the cell shrinks.
+                                withAnimation(Theme.Motion.standard) {
+                                    position = .region(MKCoordinateRegion(
+                                        center: CLLocationCoordinate2D(
+                                            latitude: cluster.centre.latitude,
+                                            longitude: cluster.centre.longitude),
+                                        span: MKCoordinateSpan(latitudeDelta: 0.012,
+                                                               longitudeDelta: 0.012)))
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -88,6 +109,10 @@ struct CommunityMapScreen: View {
             TagDetailSheet(tag: tag)
         }
         .onAppear { centreOnBuilding() }
+        .onMapCameraChange(frequency: .onEnd) { context in
+            let span = context.region.span.latitudeDelta * 111_320
+            visibleSpanMetres = max(span, 100)
+        }
         .task { await fetchCommunityTags() }
         .refreshable { await fetchCommunityTags() }
         .overlay(alignment: .bottom) {
@@ -119,6 +144,26 @@ struct CommunityMapScreen: View {
         remoteTags = result.value
         remoteNote = result.note
         isFetching = false
+    }
+
+    /// Grid clustering in screen space, with the cell size following the zoom.
+    ///
+    /// Without it a street after a real earthquake is an unreadable pile of
+    /// overlapping pins — and the pile hides exactly the thing somebody is
+    /// looking for, which is whether any of them are red.
+    private var clusters: [MapCluster<CommunityTag>] {
+        let cellSize = MarkerClustering.cellSize(forVisibleSpanMetres: visibleSpanMetres)
+        return MarkerClustering.cluster(
+            visibleTags.map { tag in
+                // Published position, not true position: a tag inherits the
+                // building's privacy setting, and an exact pin on a damaged
+                // house is an advertisement to a burglar.
+                let point = LocationPrivacy.approximate(
+                    GeoPoint(latitude: tag.latitude, longitude: tag.longitude),
+                    precision: tag.tier == .professional ? 9 : 7)
+                return (item: tag, point: point)
+            },
+            cellSizeMetres: cellSize)
     }
 
     private func centreOnBuilding() {
@@ -389,4 +434,40 @@ struct MapFilterSheet: View {
             .navigationTitle("Map")
     }
     .previewEnvironment()
+}
+
+
+/// A group of tags too close together to draw individually.
+///
+/// The count is secondary; the colour is the worst verdict in the group,
+/// because "one of these eleven is red" is the fact somebody scanning a street
+/// actually needs, and averaging it away would be the wrong summary.
+struct ClusterMarker: View {
+    let cluster: MapCluster<CommunityTag>
+    let tap: () -> Void
+
+    private var worst: SafetyVerdict {
+        let order: [SafetyVerdict] = [.red, .needsInspection, .amber, .green]
+        return order.first { verdict in cluster.items.contains { $0.verdict == verdict } }
+            ?? .needsInspection
+    }
+
+    var body: some View {
+        Button(action: tap) {
+            ZStack {
+                Circle()
+                    .fill(worst.color.opacity(0.22))
+                    .frame(width: 40, height: 40)
+                Circle()
+                    .strokeBorder(worst.color, lineWidth: 1.5)
+                    .frame(width: 40, height: 40)
+                Text("\(cluster.count)")
+                    .font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(Theme.Palette.textPrimary)
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("\(cluster.count) buildings, worst verdict \(worst.shortLabel). "
+                            + "Double tap to zoom in.")
+    }
 }

@@ -25,7 +25,7 @@ Requires Xcode 16 or later and iOS 17+.
 cd SeismicKit && swift test
 ```
 
-535 tests across seven modules. Every one of the fifty algorithms is tested
+539 tests across seven modules. Every one of the fifty algorithms is tested
 against a known input with an expected output, and every network client is
 tested against a stubbed transport — including the paths that fail, which are
 the ones that matter and the ones a live-network test would never reach
@@ -70,6 +70,13 @@ displacement and permanent tilt, which temperature cannot explain away.
 
 ## Configuration
 
+During development a `.env` at the repository root is copied into the app
+bundle by a build phase, so the vault finds it on first launch. **Debug builds
+only** — a release build never carries it, and any stale copy from a previous
+debug build is removed. On a real device you can also drop a `.env` into the
+app's documents directory through the Files app without rebuilding.
+
+
 Every credential loads from `.env`, which is gitignored. `.env.example` lists
 all of them with a one-line purpose. **None is required.** Each key upgrades one
 simulated path to a live one; without it the app uses a bundled or on-device
@@ -81,6 +88,15 @@ because the opposite is usually assumed: the USGS earthquake feed, USGS
 aftershock forecasts, and OpenStreetMap tiles.
 
 ## The parts that are easy to miss
+
+**The working is shown.** Analysis is a whole screen of it: the Welch spectrum a
+period was picked off, with the smoothing as a toggle rather than a silent
+default; the peaks and their prominences; three independent period estimates
+side by side; the Hilbert envelope the damping was fitted to; a response
+spectrum with your building's period marked on it; and a spectrogram, where a
+building that softens during an earthquake shows it as a bright band sliding
+downwards.
+
 
 **The analyst cannot invent a number.** Any answer it produces is checked
 against the facts it was given; a numeric token that appears nowhere in them
