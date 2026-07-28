@@ -51,10 +51,11 @@ final class AppEnvironment: ObservableObject {
     @Published private(set) var observations: [ModeObservation] = []
 
     @Published var selectedBuildingID: UUID?
-    @Published private(set) var nodeSnapshot: NodeSession.Snapshot?
-    @Published private(set) var nodeLog: [LogLine] = []
-    @Published private(set) var discoveredNodes: [DiscoveredNode] = []
-    @Published private(set) var lastSelfTest: SelfTestResult?
+
+    /// Live motion data, deliberately on its own object rather than published
+    /// here. See `NodeStream` — publishing a 20 Hz stream from this object was
+    /// re-rendering every screen in the app twenty times a second.
+    let node = NodeStream()
 
     /// Set while an event is actually happening. Everything else in the UI gets
     /// out of the way when this is non-nil.
@@ -65,12 +66,6 @@ final class AppEnvironment: ObservableObject {
     }
 
     @Published var isPresentationMode = false
-
-    struct LogLine: Identifiable {
-        let id = UUID()
-        let text: String
-        let at: Date
-    }
 
     /// An event in progress, driving the full-screen takeover.
     struct ActiveEvent: Equatable {
@@ -282,8 +277,7 @@ final class AppEnvironment: ObservableObject {
     private func handle(_ event: NodeEvent) {
         switch event {
         case .discovered(let node):
-            discoveredNodes.removeAll { $0.id == node.id }
-            discoveredNodes.append(node)
+            self.node.record(node)
 
         case .connectionChanged(let state):
             Haptics.shared.play(state.isLive ? .connectionEstablished : .connectionLost)
@@ -303,7 +297,7 @@ final class AppEnvironment: ObservableObject {
             Haptics.shared.play(.warning)
 
         case .selfTestResult(let result):
-            lastSelfTest = result
+            node.recordSelfTest(result)
 
         case .log(let message):
             appendLog(message)
@@ -313,13 +307,10 @@ final class AppEnvironment: ObservableObject {
             break
         }
 
-        nodeSnapshot = session.snapshot()
+        node.update(session.snapshot())
     }
 
-    private func appendLog(_ text: String) {
-        nodeLog.insert(LogLine(text: text, at: Date()), at: 0)
-        if nodeLog.count > 200 { nodeLog.removeLast(nodeLog.count - 200) }
-    }
+    private func appendLog(_ text: String) { node.append(text) }
 
     /// A display-linked tick drives the simulated node, so its data arrives in
     /// step with the animation rather than on an unrelated timer.
@@ -330,7 +321,7 @@ final class AppEnvironment: ObservableObject {
             .sink { [weak self] _ in
                 guard let self else { return }
                 simulatedNode?.tick(deltaTime: tickInterval)
-                nodeSnapshot = session.snapshot()
+                node.update(session.snapshot())
                 updateActiveEvent()
             }
     }
@@ -495,7 +486,7 @@ final class AppEnvironment: ObservableObject {
             isSimulated: session.attachedTransport?.isSimulated ?? true,
             label: "Recorded event")
 
-        if let telemetry = nodeSnapshot?.telemetry {
+        if let telemetry = node.snapshot?.telemetry {
             event.residualDisplacement = telemetry.residualDisplacement
             event.permanentTilt = telemetry.permanentTilt
             event.tiltAngle = telemetry.tiltAngle
@@ -503,8 +494,8 @@ final class AppEnvironment: ObservableObject {
             event.gridPowerLost = !telemetry.gridPowerPresent
             event.waterDetected = telemetry.waterDetected
         }
-        event.actuatorReports = Array((nodeSnapshot?.actuators ?? [:]).values)
-        event.votes = nodeSnapshot?.votes ?? []
+        event.actuatorReports = Array((node.snapshot?.actuators ?? [:]).values)
+        event.votes = node.snapshot?.votes ?? []
 
         store.upsert(event)
         refresh()
@@ -549,11 +540,11 @@ final class AppEnvironment: ObservableObject {
     }
 
     var connectionState: ConnectionState {
-        nodeSnapshot?.connection ?? .disconnected
+        node.snapshot?.connection ?? .disconnected
     }
 
     var isUsingSimulatedData: Bool {
-        nodeSnapshot?.isSimulated ?? true
+        node.snapshot?.isSimulated ?? true
     }
 
     /// The count of configured API keys, for the settings summary.

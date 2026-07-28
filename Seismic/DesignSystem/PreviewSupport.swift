@@ -14,13 +14,16 @@ import SwiftUI
 struct PreviewEnvironment: ViewModifier {
     @StateObject private var environment = AppEnvironment.preview()
     @StateObject private var notifications = NotificationCentre()
+    @StateObject private var tutorial = TutorialDirector()
 
     func body(content: Content) -> some View {
         content
             .environmentObject(environment)
             .environmentObject(environment.services)
+            .environmentObject(environment.node)
             .environmentObject(environment.voice)
             .environmentObject(notifications)
+            .environmentObject(tutorial)
             .preferredColorScheme(.dark)
     }
 }

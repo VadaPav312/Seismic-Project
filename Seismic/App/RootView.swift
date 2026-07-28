@@ -59,6 +59,7 @@ struct RootView: View {
     @EnvironmentObject private var voice: VoiceController
     @EnvironmentObject private var notifications: NotificationCentre
     @StateObject private var director = PresentationDirector()
+    @StateObject private var tutorial = TutorialDirector()
     /// The tab bar's selection, which can only ever be one of the five primary
     /// sections.
     @State private var selection: AppSection = .home
@@ -75,6 +76,16 @@ struct RootView: View {
         ZStack {
             if !env.isBootstrapped {
                 LaunchView()
+                    .transition(.opacity)
+            } else if services.account == nil {
+                // Sign-in comes first, before the introduction: the intro ends
+                // by importing a real building, and that is worth keeping if
+                // an account exists to keep it against.
+                //
+                // "Continue without an account" creates a guest, which is a
+                // real account locally — so this gate always has a way through
+                // and never blocks anybody out of the app.
+                AuthSheet(isLaunchGate: true)
                     .transition(.opacity)
             } else if !env.didCompleteOnboarding {
                 OnboardingFlow()
@@ -102,7 +113,15 @@ struct RootView: View {
                 }
                 .zIndex(90)
             }
+
+            // Below both of the above: a tour is the least important thing on
+            // screen, and an event or a demonstration should bury it.
+            if tutorial.isRunning {
+                TutorialOverlay(director: tutorial)
+                    .zIndex(80)
+            }
         }
+        .collectsTutorialAnchors(into: tutorial)
         .fullScreenCover(item: $presented) { section in
             NavigationStack {
                 destination(for: section)
@@ -115,18 +134,45 @@ struct RootView: View {
                         }
                     }
             }
+            // A cover is its own hierarchy and inherits nothing, so every
+            // object a secondary screen expects has to be handed over again.
+            // Settings reads the tutorial director; omitting it here would
+            // crash the moment somebody opened Settings.
+            .environmentObject(tutorial)
         }
         .task {
             // Honours SEISMIC_INITIAL_TAB so a demo, a screenshot run or a UI
             // test can open straight onto any screen — including the ones that
             // have no tab of their own.
-            guard let requested = ProcessInfo.processInfo.environment["SEISMIC_INITIAL_TAB"]
-                .flatMap(AppSection.init(rawValue:)) else { return }
-            show(requested)
+            if let requested = ProcessInfo.processInfo.environment["SEISMIC_INITIAL_TAB"]
+                .flatMap(AppSection.init(rawValue:)) {
+                show(requested)
+                return
+            }
+            startTutorialIfDue()
+        }
+        // The intro ends by setting this, which is the moment the real interface
+        // first appears — and therefore the only moment a tour of it makes sense.
+        // Three separate moments can make the tour due, and it needs all of
+        // them. `.task` fires before `bootstrap()` has finished, so on a launch
+        // where onboarding was already complete the guard below fails and
+        // nothing would ever ask again — which is exactly how the tour came to
+        // never appear for a returning user.
+        .onChange(of: env.isBootstrapped) { _, _ in startTutorialIfDue() }
+        .onChange(of: env.didCompleteOnboarding) { _, completed in
+            guard completed else { return }
+            startTutorialIfDue()
+        }
+        .onChange(of: tutorial.replayRequested) { _, requested in
+            guard requested else { return }
+            tutorial.replayRequested = false
+            presented = nil          // step out of Settings, which is a cover
+            startTutorialIfDue()
         }
         .animation(Theme.Motion.standard, value: env.activeEvent?.id)
         .animation(Theme.Motion.gentle, value: env.isBootstrapped)
         .animation(Theme.Motion.gentle, value: env.didCompleteOnboarding)
+        .animation(Theme.Motion.gentle, value: services.account == nil)
         // A recognised command is consumed here rather than in each screen, so
         // "show the map" works from wherever the user happens to be.
         .onChange(of: voice.recognisedCommand) { _, command in
@@ -151,6 +197,23 @@ struct RootView: View {
                 "\($0.confirmation) This one moves something physical, so it needs a tap as "
                 + "well as a word."
             } ?? "")
+        }
+    }
+
+    /// Starts the guided tour, once, after the introduction.
+    ///
+    /// Deferred by a beat so the first screen has actually laid out — the
+    /// spotlight is cut around frames the highlighted views report, and none of
+    /// them have reported anything until they have been drawn once.
+    private func startTutorialIfDue() {
+        guard env.isBootstrapped, env.didCompleteOnboarding,
+              services.account != nil, !tutorial.didComplete, !tutorial.isRunning else { return }
+        Task {
+            try? await Task.sleep(for: .milliseconds(600))
+            guard !tutorial.didComplete else { return }
+            withAnimation(Theme.Motion.gentle) {
+                tutorial.start { section in show(section) }
+            }
         }
     }
 
@@ -221,6 +284,7 @@ struct RootView: View {
             }
         }
         .tint(Theme.Palette.accent)
+        .environmentObject(tutorial)
     }
 
     @ToolbarContentBuilder
@@ -244,6 +308,7 @@ struct RootView: View {
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
+            .tutorialAnchor(.moreMenu)
         }
     }
 

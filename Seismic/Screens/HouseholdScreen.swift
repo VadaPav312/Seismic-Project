@@ -347,6 +347,16 @@ struct HouseholdScreen: View {
 // MARK: - Sign in
 
 struct AuthSheet: View {
+    /// True when this is the first thing shown at launch rather than a sheet
+    /// pulled up from the Household screen.
+    ///
+    /// The difference is only in the framing: a gate has no Close button,
+    /// because there is nothing behind it to go back to, and it introduces the
+    /// app rather than assuming you already know what it is. The sign-in paths
+    /// themselves are identical, which is why this is a flag rather than a
+    /// second screen that would drift out of step with this one.
+    var isLaunchGate = false
+
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var services: ServiceHub
 
@@ -363,6 +373,8 @@ struct AuthSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Metrics.spacingLoose) {
+                    if isLaunchGate { launchHeader }
+
                     Text("Signing in backs up your buildings and lets a household share them. "
                          + "It is not required for anything else.")
                         .font(Theme.Typography.callout)
@@ -392,7 +404,7 @@ struct AuthSheet: View {
 
                     Button("Continue without an account") {
                         services.continueAsGuest()
-                        dismiss()
+                        finish()
                     }
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Palette.accent)
@@ -401,12 +413,47 @@ struct AuthSheet: View {
                 .padding(Theme.Metrics.screenPadding)
             }
             .seismicBackground()
-            .navigationTitle("Sign in")
+            .navigationTitle(isLaunchGate ? "" : "Sign in")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
+                if !isLaunchGate {
+                    ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } }
+                }
             }
         }
+    }
+
+    /// The first thing anybody sees. It says what the app is before asking for
+    /// anything, because a sign-in form with no context is a reason to close an
+    /// app rather than a reason to use it.
+    private var launchHeader: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+            Image(systemName: "waveform.path.ecg")
+                .font(.system(size: 40, weight: .thin))
+                .foregroundStyle(Theme.Palette.accent)
+
+            Text("SEISMIC")
+                .font(.system(size: 30, weight: .semibold))
+                .tracking(6)
+                .foregroundStyle(Theme.Palette.textPrimary)
+
+            Text("Know whether your building is safe to be in — from its own "
+                 + "measurements, not from a guess.")
+                .font(Theme.Typography.body)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.top, Theme.Metrics.spacing)
+        .padding(.bottom, Theme.Metrics.spacing)
+    }
+
+    /// Leaving is only possible when there is somewhere to leave to. As the
+    /// launch gate this view is dismissed by the account appearing, which
+    /// RootView is already watching for.
+    private func finish() {
+        guard !isLaunchGate else { return }
+        dismiss()
     }
 
     private var emailForm: some View {
@@ -481,7 +528,7 @@ struct AuthSheet: View {
                 : await services.signUp(email: email, password: password,
                                         displayName: displayName.isEmpty ? email : displayName)
             isWorking = false
-            if let failure { error = failure } else { dismiss() }
+            if let failure { error = failure } else { finish() }
         }
     }
 
@@ -509,7 +556,7 @@ struct AuthSheet: View {
                                                                              : name,
                                                    provider: .apple)
                 }
-                dismiss()
+                finish()
             }
         case .failure(let failure):
             let code = (failure as NSError).code
@@ -527,7 +574,7 @@ struct AuthSheet: View {
             let message = await services.signInWithBrowser(provider: .google)
             isWorking = false
             error = message
-            if message == nil, services.account?.isGuest == false { dismiss() }
+            if message == nil, services.account?.isGuest == false { finish() }
         }
     }
 }

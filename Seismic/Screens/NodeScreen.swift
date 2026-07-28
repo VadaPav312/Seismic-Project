@@ -6,6 +6,7 @@ import SeismicDevice
 /// Hardware status, actuators, diagnostics and the power budget.
 struct NodeScreen: View {
     @EnvironmentObject private var env: AppEnvironment
+    @EnvironmentObject private var node: NodeStream
     @State private var showingScanner = false
 
     var body: some View {
@@ -34,7 +35,7 @@ struct NodeScreen: View {
                 ConnectionBadge(state: env.connectionState)
             }
 
-            if let snapshot = env.nodeSnapshot {
+            if let snapshot = node.snapshot {
                 ReadoutGrid(readouts: [
                     Readout(label: "Node", value: snapshot.nodeName, size: .small),
                     Readout(label: "State", value: snapshot.telemetry.state.label, size: .small),
@@ -87,7 +88,7 @@ struct NodeScreen: View {
             SectionLabel("Safety actuators", systemImage: "bolt.shield")
 
             ForEach(ActuatorKind.allCases) { kind in
-                let report = env.nodeSnapshot?.actuators[kind]
+                let report = node.snapshot?.actuators[kind]
                 ActuatorRow(kind: kind, report: report) { command in
                     env.session.send(command)
                     Haptics.shared.play(.actuatorFired)
@@ -105,7 +106,7 @@ struct NodeScreen: View {
         let budget = PowerBudget.usb2
         let planner = ActuationPlanner(budget: budget)
         let steps = planner.plan(ActuatorKind.allCases)
-        let draw = env.nodeSnapshot?.telemetry.activeCurrentDraw_mA ?? budget.quiescent
+        let draw = node.snapshot?.telemetry.activeCurrentDraw_mA ?? budget.quiescent
 
         return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
             SectionLabel("Power budget", systemImage: "bolt")
@@ -176,7 +177,7 @@ struct NodeScreen: View {
         VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
             SectionLabel("Sensors", systemImage: "sensor")
 
-            if let telemetry = env.nodeSnapshot?.telemetry {
+            if let telemetry = node.snapshot?.telemetry {
                 ReadoutGrid(readouts: [
                     Readout(label: "Board temp",
                             value: String(format: "%.1f", telemetry.boardTemperature), unit: "°C",
@@ -237,7 +238,7 @@ struct NodeScreen: View {
     /// channels that dissented. A system that fires the gas valve on one
     /// sensor's opinion is a system nobody will leave switched on.
     private var corroboration: some View {
-        let votes = env.nodeSnapshot?.votes ?? []
+        let votes = node.snapshot?.votes ?? []
         let decision = SensorFusion.vote(votes)
 
         return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
@@ -319,7 +320,7 @@ struct NodeScreen: View {
                 .buttonStyle(SecondaryButtonStyle())
             }
 
-            if let result = env.lastSelfTest {
+            if let result = node.lastSelfTest {
                 HStack(spacing: 6) {
                     Image(systemName: result.passed ? "checkmark.seal.fill"
                                                     : "exclamationmark.triangle.fill")
@@ -421,14 +422,14 @@ struct NodeScreen: View {
 
     private var logView: some View {
         VStack(alignment: .leading, spacing: 6) {
-            SectionLabel("Node log", trailing: "\(env.nodeLog.count) lines")
+            SectionLabel("Node log", trailing: "\(node.log.count) lines")
 
-            if env.nodeLog.isEmpty {
+            if node.log.isEmpty {
                 Text("Nothing logged yet.")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Palette.textTertiary)
             } else {
-                ForEach(env.nodeLog.prefix(25)) { line in
+                ForEach(node.log.prefix(25)) { line in
                     HStack(alignment: .top, spacing: 8) {
                         Text(line.at.formatted(date: .omitted, time: .standard))
                             .font(.system(size: 10, design: .monospaced))
@@ -524,6 +525,7 @@ struct ActuatorRow: View {
 
 /// The bluetooth scanner, structured as a guided list.
 struct NodeScannerSheet: View {
+    @EnvironmentObject private var node: NodeStream
     @EnvironmentObject private var env: AppEnvironment
     @Environment(\.dismiss) private var dismiss
 
@@ -531,7 +533,7 @@ struct NodeScannerSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: Theme.Metrics.spacing) {
-                    if env.discoveredNodes.isEmpty {
+                    if node.discovered.isEmpty {
                         DesignedEmptyState(
                             icon: "dot.radiowaves.left.and.right",
                             title: "Looking for nodes",
@@ -545,7 +547,7 @@ struct NodeScannerSheet: View {
                             })
                             .frame(minHeight: 360)
                     } else {
-                        ForEach(env.discoveredNodes) { node in
+                        ForEach(node.discovered) { node in
                             Button {
                                 env.session.connect(to: node.id)
                                 dismiss()

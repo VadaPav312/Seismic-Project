@@ -10,6 +10,7 @@ import SeismicStructures
 /// animated idea rather than a wall of text, and every step has a way past it.
 struct OnboardingFlow: View {
     @EnvironmentObject private var env: AppEnvironment
+    @EnvironmentObject private var node: NodeStream
     @State private var step = 0
     @AppStorage("onboardingStep") private var savedStep = 0
 
@@ -49,41 +50,64 @@ struct OnboardingFlow: View {
         .accessibilityLabel("Step \(step + 1) of \(steps)")
     }
 
+    /// Back and Continue, in one bordered bar.
+    ///
+    /// The previous version had three faults that compounded into the glitch.
+    /// `.padding` and `.frame` were applied to the Button *outside* the
+    /// `buttonStyle`, so the style's filled background hugged the text while
+    /// the padding sat uselessly around the outside — a pill with the label
+    /// jammed against its edges. Back had no style at all, so the two controls
+    /// did not look like the same kind of thing. And Skip was an overlay
+    /// centred on the same HStack, so it drew straight through Continue.
+    ///
+    /// Skip is now gone entirely, which also removes the collision. Nobody is
+    /// stranded: every individual step's own action is optional, and the flow
+    /// is five taps at worst.
     private var controls: some View {
         HStack(spacing: Theme.Metrics.spacing) {
-            if step > 0 {
-                Button("Back") {
-                    withAnimation(Theme.Motion.standard) { step -= 1 }
-                }
-                .font(Theme.Typography.callout)
-                .foregroundStyle(Theme.Palette.textSecondary)
+            Button {
+                Haptics.shared.play(.selection)
+                withAnimation(Theme.Motion.standard) { step -= 1 }
+            } label: {
+                Text("Back")
+                    .font(Theme.Typography.headline)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: Theme.Metrics.minimumTapTarget)
             }
+            .buttonStyle(SecondaryButtonStyle())
+            // Kept in the layout on the first step rather than removed, so
+            // Continue does not jump sideways the moment you advance.
+            .disabled(step == 0)
+            .opacity(step == 0 ? 0.35 : 1)
 
-            Spacer()
-
-            // A way past every step. Nobody is ever stuck.
-            Button(step == steps - 1 ? "Start using Seismic" : "Continue") {
+            Button {
                 Haptics.shared.play(.selection)
                 if step == steps - 1 {
                     withAnimation(Theme.Motion.gentle) { env.didCompleteOnboarding = true }
                 } else {
                     withAnimation(Theme.Motion.standard) { step += 1 }
                 }
+            } label: {
+                Text(step == steps - 1 ? "Start using Seismic" : "Continue")
+                    .font(Theme.Typography.headline)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: Theme.Metrics.minimumTapTarget)
             }
-            .font(Theme.Typography.headline)
-            .padding(.horizontal, 22)
-            .frame(height: Theme.Metrics.minimumTapTarget)
             .buttonStyle(PrimaryButtonStyle())
         }
-        .overlay(alignment: .center) {
-            if step < steps - 1 {
-                Button("Skip") {
-                    withAnimation(Theme.Motion.gentle) { env.didCompleteOnboarding = true }
-                }
-                .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.Palette.textTertiary)
-            }
-        }
+        .padding(Theme.Metrics.spacing)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadius, style: .continuous)
+                .fill(Theme.Palette.surface)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadius, style: .continuous)
+                .strokeBorder(Theme.Palette.hairlineStrong, lineWidth: 2)
+        )
+        .frame(maxWidth: 460)
+        .frame(maxWidth: .infinity)
         .padding(Theme.Metrics.screenPadding)
     }
 }
@@ -303,6 +327,7 @@ private struct ConnectionStep: View {
 }
 
 private struct FirstMeasurementStep: View {
+    @EnvironmentObject private var node: NodeStream
     @EnvironmentObject private var env: AppEnvironment
     @State private var stage = 0
 
@@ -323,7 +348,7 @@ private struct FirstMeasurementStep: View {
                     ReadoutGrid(readouts: [
                         Readout(label: "Baseline period",
                                 value: String(format: "%.3f",
-                                              env.nodeSnapshot?.telemetry.measuredPeriod
+                                              node.snapshot?.telemetry.measuredPeriod
                                               ?? building.empiricalPeriod),
                                 unit: "s", tint: Theme.Palette.accent, size: .large),
                         Readout(label: "Building", value: building.name, size: .small),

@@ -14,6 +14,7 @@ struct SeismicApp: App {
             RootView()
                 .environmentObject(environment)
                 .environmentObject(environment.services)
+                .environmentObject(environment.node)
                 .environmentObject(environment.voice)
                 .environmentObject(environment.sync)
                 .environmentObject(notifications)

@@ -9,6 +9,7 @@ struct SettingsScreen: View {
     @EnvironmentObject private var services: ServiceHub
     @EnvironmentObject private var voice: VoiceController
     @EnvironmentObject private var notifications: NotificationCentre
+    @EnvironmentObject private var tutorial: TutorialDirector
     @State private var showingLedger = false
     @State private var showingGlossary = false
 
@@ -159,6 +160,13 @@ struct SettingsScreen: View {
                     env.didCompleteOnboarding = false
                 } label: {
                     Label("Replay the introduction", systemImage: "arrow.counterclockwise")
+                }
+                Button {
+                    // Clearing the flag is enough: RootView starts the tour
+                    // whenever it is unset and the main interface is showing.
+                    tutorial.requestReplay()
+                } label: {
+                    Label("Take the guided tour again", systemImage: "hand.point.up.left")
                 }
                 Toggle(isOn: $env.isPresentationMode) {
                     Label("Presentation mode", systemImage: "play.rectangle")

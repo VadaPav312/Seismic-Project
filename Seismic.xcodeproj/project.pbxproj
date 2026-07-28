@@ -8,8 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		AA00000000000000000001 /* SeismicKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000000000000000002 /* SeismicKit */; };
-		AA00000000000000000021 /* SeismicKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000000000000000020 /* SeismicKit */; };
 		AA0000000000000000001D /* SeismicWidgets.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = AA00000000000000000013 /* SeismicWidgets.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+		AA00000000000000000021 /* SeismicKit in Frameworks */ = {isa = PBXBuildFile; productRef = AA00000000000000000020 /* SeismicKit */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -42,27 +42,39 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		AA00000000000000000022 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+		AA00000000000000000022 /* Exceptions for "SeismicWidgets" folder in "SeismicWidgets" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
-				SeismicWidgets.entitlements,
 			);
 			target = AA00000000000000000015 /* SeismicWidgets */;
 		};
-		AA00000000000000000023 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
+		AA00000000000000000023 /* Exceptions for "Seismic" folder in "Seismic" target */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				Info.plist,
-				Seismic.entitlements,
 			);
 			target = AA00000000000000000008 /* Seismic */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		AA00000000000000000004 /* Seismic */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (AA00000000000000000023 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); path = Seismic; sourceTree = "<group>"; };
-		AA00000000000000000014 /* SeismicWidgets */ = {isa = PBXFileSystemSynchronizedRootGroup; exceptions = (AA00000000000000000022 /* PBXFileSystemSynchronizedBuildFileExceptionSet */, ); path = SeismicWidgets; sourceTree = "<group>"; };
+		AA00000000000000000004 /* Seismic */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				AA00000000000000000023 /* Exceptions for "Seismic" folder in "Seismic" target */,
+			);
+			path = Seismic;
+			sourceTree = "<group>";
+		};
+		AA00000000000000000014 /* SeismicWidgets */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				AA00000000000000000022 /* Exceptions for "SeismicWidgets" folder in "SeismicWidgets" target */,
+			);
+			path = SeismicWidgets;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -323,6 +335,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = HKBY6KPF42;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Seismic/Info.plist;
@@ -365,6 +378,7 @@
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_ASSET_PATHS = "";
+				DEVELOPMENT_TEAM = HKBY6KPF42;
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = Seismic/Info.plist;
@@ -405,6 +419,7 @@
 				CODE_SIGN_ENTITLEMENTS = SeismicWidgets/SeismicWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = HKBY6KPF42;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SeismicWidgets/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -430,6 +445,7 @@
 				CODE_SIGN_ENTITLEMENTS = SeismicWidgets/SeismicWidgets.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = HKBY6KPF42;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = SeismicWidgets/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
@@ -442,10 +458,10 @@
 				PRODUCT_BUNDLE_IDENTIFIER = app.seismic.ios.widgets;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SKIP_INSTALL = YES;
+				SWIFT_COMPILATION_MODE = wholemodule;
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
-				SWIFT_COMPILATION_MODE = wholemodule;
 			};
 			name = Release;
 		};

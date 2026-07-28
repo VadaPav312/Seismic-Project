@@ -11,6 +11,7 @@ import SeismicSignal
 /// just scrolled past.
 struct MonitorScreen: View {
     @EnvironmentObject private var env: AppEnvironment
+    @EnvironmentObject private var node: NodeStream
 
     @State private var frozen: TriaxialRecord?
     @State private var windowSeconds: Double = 30
@@ -18,8 +19,22 @@ struct MonitorScreen: View {
     @State private var selectedAxes: Set<TriaxialRecord.Axis> = [.x, .y, .z]
 
     private var record: TriaxialRecord {
-        frozen ?? env.nodeSnapshot?.recent ?? TriaxialRecord.zeros(count: 0, sampleRate: 100)
+        frozen ?? node.snapshot?.recent ?? TriaxialRecord.zeros(count: 0, sampleRate: 100)
     }
+
+    /// The window actually drawn, prepared off the render path.
+    ///
+    /// This used to be a computed property, and it was the single most
+    /// expensive thing in the app. Slicing thirty seconds of three axes and
+    /// running a fourth-order Butterworth over all of it is roughly nine
+    /// thousand samples of IIR filtering — and being a computed property, it
+    /// ran on *every* body evaluation, which the 20 Hz snapshot guaranteed.
+    /// The chart then threw most of it away, because a trace 390 points wide
+    /// cannot show three thousand samples per axis.
+    ///
+    /// Now it is computed when the data changes rather than when the view
+    /// draws, and decimated to what the screen can actually resolve.
+    @State private var prepared = TriaxialRecord.zeros(count: 0, sampleRate: 100)
 
     private var visible: TriaxialRecord {
         guard record.count > 0 else { return record }
@@ -29,16 +44,66 @@ struct MonitorScreen: View {
                               z: record.z.slice(from: from, to: record.duration))
     }
 
-    private var processed: TriaxialRecord {
-        guard showsFiltered, visible.count > 32 else { return visible }
-        let filter = ButterworthFilter(kind: .bandpass, order: 4,
-                                       sampleRate: visible.sampleRate,
-                                       lowCutoff: 0.1,
-                                       highCutoff: min(25, visible.sampleRate / 2.5))
-        return TriaxialRecord(x: filter.apply(visible.x),
-                              y: filter.apply(visible.y),
-                              z: filter.apply(visible.z))
+    /// Filters, then decimates to at most `maximumDrawnSamples` per axis.
+    ///
+    /// Decimation is by min/max pairs rather than by picking every nth sample:
+    /// a seismic trace is mostly about its envelope, and plain subsampling
+    /// makes a spike disappear entirely depending on where it happens to fall.
+    private static let maximumDrawnSamples = 900
+
+    private func prepare() {
+        let window = visible
+        guard window.count > 32 else { prepared = window; return }
+
+        let source: TriaxialRecord
+        if showsFiltered {
+            let filter = ButterworthFilter(kind: .bandpass, order: 4,
+                                           sampleRate: window.sampleRate,
+                                           lowCutoff: 0.1,
+                                           highCutoff: min(25, window.sampleRate / 2.5))
+            source = TriaxialRecord(x: filter.apply(window.x),
+                                    y: filter.apply(window.y),
+                                    z: filter.apply(window.z))
+        } else {
+            source = window
+        }
+
+        prepared = TriaxialRecord(x: Self.decimated(source.x),
+                                  y: Self.decimated(source.y),
+                                  z: Self.decimated(source.z))
     }
+
+    private static func decimated(_ waveform: Waveform) -> Waveform {
+        guard waveform.samples.count > maximumDrawnSamples else { return waveform }
+        let bucket = Int((Double(waveform.samples.count)
+                          / Double(maximumDrawnSamples)).rounded(.up))
+        guard bucket > 1 else { return waveform }
+
+        var out: [Double] = []
+        out.reserveCapacity(maximumDrawnSamples + 2)
+        var index = 0
+        while index < waveform.samples.count {
+            let end = min(index + bucket, waveform.samples.count)
+            let slice = waveform.samples[index..<end]
+            // Both extremes of each bucket, in the order they occurred, so the
+            // drawn envelope matches the real one.
+            let lowest = slice.min() ?? 0
+            let highest = slice.max() ?? 0
+            if slice.firstIndex(of: lowest) ?? 0 <= (slice.firstIndex(of: highest) ?? 0) {
+                out.append(lowest); out.append(highest)
+            } else {
+                out.append(highest); out.append(lowest)
+            }
+            index = end
+        }
+        // The rate is now nominal — the chart plots against sample index and the
+        // window length is unchanged, so the time axis still reads correctly.
+        let rate = waveform.sampleRate * Double(out.count)
+            / Double(max(waveform.samples.count, 1))
+        return Waveform(samples: out, sampleRate: max(rate, 1), unit: waveform.unit)
+    }
+
+    private var processed: TriaxialRecord { prepared }
 
     var body: some View {
         ScrollView {
@@ -51,7 +116,16 @@ struct MonitorScreen: View {
                             + "appears within a few seconds, check the connection on the node "
                             + "screen — or use the simulated node, which needs no hardware.",
                         actionTitle: "Use the simulated node",
-                        action: { env.attachSimulatedNode() })
+                        action: {
+                            // Clearing the freeze matters: freezing while the
+                            // trace was empty latched an empty record into
+                            // `frozen`, and since `record` prefers it, the
+                            // screen stayed on this empty state no matter how
+                            // much data arrived — which made this button look
+                            // broken when it had worked perfectly.
+                            frozen = nil
+                            env.attachSimulatedNode()
+                        })
                         .frame(minHeight: 380)
                 } else {
                     traces
@@ -66,14 +140,29 @@ struct MonitorScreen: View {
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     Haptics.shared.play(.selection)
-                    frozen = frozen == nil ? env.nodeSnapshot?.recent : nil
+                    if frozen == nil {
+                        // Only freeze something worth looking at. Freezing an
+                        // empty buffer pins the screen to the empty state.
+                        let current = node.snapshot?.recent
+                        frozen = (current?.count ?? 0) > 8 ? current : nil
+                    } else {
+                        frozen = nil
+                    }
                 } label: {
                     Label(frozen == nil ? "Freeze" : "Live",
                           systemImage: frozen == nil ? "pause.circle" : "play.circle")
                 }
                 .tint(frozen == nil ? Theme.Palette.accent : Theme.Palette.verdictAmber)
+                .disabled(frozen == nil && (node.snapshot?.recent.count ?? 0) <= 8)
+                .tutorialAnchor(.monitorFreeze)
             }
         }
+        // Re-prepared when the data changes or a control moves — not on every
+        // body evaluation.
+        .task(id: node.revision) { prepare() }
+        .onChange(of: windowSeconds) { _, _ in prepare() }
+        .onChange(of: showsFiltered) { _, _ in prepare() }
+        .onChange(of: frozen == nil) { _, _ in prepare() }
     }
 
     private var traces: some View {
@@ -89,7 +178,7 @@ struct MonitorScreen: View {
 
             WaveformChart(channels: channels, height: 210, unitLabel: "m/s²")
 
-            if let ratio = env.nodeSnapshot?.ratio, ratio.count > 8 {
+            if let ratio = node.snapshot?.ratio, ratio.count > 8 {
                 TriggerRatioStrip(ratio: ratio, threshold: 4.0)
             }
         }

@@ -11,6 +11,7 @@ import SeismicData
 /// are my neighbours reporting. Everything else is one tap away.
 struct HomeScreen: View {
     @EnvironmentObject private var env: AppEnvironment
+    @EnvironmentObject private var node: NodeStream
     @State private var showingCheckIn = false
     @State private var showingImport = false
 
@@ -82,6 +83,7 @@ struct HomeScreen: View {
                                        confidence: assessment.confidence)
                     }
                     .buttonStyle(.plain)
+                    .tutorialAnchor(.homeVerdict)
 
                     if let change = assessment.periodChangePercent {
                         ReadoutGrid(readouts: [
@@ -114,7 +116,7 @@ struct HomeScreen: View {
             ReadoutGrid(readouts: [
                 Readout(label: "Measured period",
                         value: String(format: "%.3f",
-                                      env.nodeSnapshot?.telemetry.measuredPeriod
+                                      node.snapshot?.telemetry.measuredPeriod
                                       ?? building.empiricalPeriod),
                         unit: "s", tint: Theme.Palette.accent, size: .large),
                 Readout(label: "Expected for this type",
@@ -122,7 +124,7 @@ struct HomeScreen: View {
                         size: .medium),
                 Readout(label: "Structure temperature",
                         value: String(format: "%.1f",
-                                      env.nodeSnapshot?.telemetry.structureTemperature ?? 19),
+                                      node.snapshot?.telemetry.structureTemperature ?? 19),
                         unit: "°C", size: .medium),
                 Readout(label: "Measurements on record",
                         value: "\(env.observations.filter { $0.modeNumber == 1 }.count)",
@@ -159,7 +161,7 @@ struct HomeScreen: View {
                     actionTitle: "Connect real hardware") {}
             }
 
-            if let telemetry = env.nodeSnapshot?.telemetry {
+            if let telemetry = node.snapshot?.telemetry {
                 ReadoutGrid(readouts: [
                     Readout(label: "State", value: telemetry.state.label, size: .small),
                     Readout(label: "Trigger ratio",

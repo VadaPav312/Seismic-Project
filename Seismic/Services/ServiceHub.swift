@@ -131,6 +131,15 @@ final class ServiceHub: ObservableObject {
            let stored = try? JSONDecoder().decode(UserAccount.self, from: data) {
             account = stored
         }
+
+        // Lets a screenshot run or a UI test start past the sign-in gate, in
+        // the same spirit as SEISMIC_INITIAL_TAB. It grants a guest account and
+        // nothing more — there is no way to fake a signed-in account from here,
+        // because a guest is exactly what somebody gets for declining anyway.
+        if account == nil,
+           ProcessInfo.processInfo.environment["SEISMIC_SKIP_SIGN_IN"] == "1" {
+            account = .guest()
+        }
         if let data = defaults.data(forKey: Self.householdKey),
            let stored = try? JSONDecoder().decode(Household.self, from: data) {
             household = stored

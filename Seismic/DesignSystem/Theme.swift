@@ -160,13 +160,22 @@ extension DamageStateColors {
     /// Damage states use a graduated scale rather than the verdict colours, so a
     /// storey shaded orange in the simulator is never confused with a building
     /// tagged amber on the map.
+    /// Dimmed roughly a fifth from the original ramp.
+    ///
+    /// These are painted across large solid faces of a 3D model on a near-black
+    /// background, which is a very different thing from a few coloured pixels in
+    /// a chart: at the old values a damaged tower filled the screen with
+    /// saturated orange and was unpleasant to look at for any length of time.
+    /// The ordering and the hue steps are unchanged, so the ramp still reads
+    /// left to right as increasing damage, and each step still clears the
+    /// contrast needed against the background.
     static func color(for state: Int) -> Color {
         switch state {
-        case 0: Color(red: 0.35, green: 0.55, blue: 0.75)
-        case 1: Color(red: 0.45, green: 0.72, blue: 0.78)
-        case 2: Color(red: 0.90, green: 0.78, blue: 0.42)
-        case 3: Color(red: 0.90, green: 0.52, blue: 0.32)
-        default: Color(red: 0.80, green: 0.28, blue: 0.30)
+        case 0: Color(red: 0.29, green: 0.44, blue: 0.60)
+        case 1: Color(red: 0.36, green: 0.58, blue: 0.63)
+        case 2: Color(red: 0.74, green: 0.63, blue: 0.35)
+        case 3: Color(red: 0.75, green: 0.44, blue: 0.28)
+        default: Color(red: 0.68, green: 0.25, blue: 0.27)
         }
     }
 }

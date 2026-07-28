@@ -1,6 +1,7 @@
 import Foundation
 import SeismicCore
 import SeismicData
+import SeismicGeo
 
 /// One thing the user might have meant when they typed a building's name.
 public struct BuildingCandidate: Identifiable, Sendable, Equatable, Codable {
@@ -591,6 +592,10 @@ public actor BuildingSearchService {
     private let client: ResilientClient
     private var cache = LRUCache<String, [BuildingCandidate]>(countLimit: 32)
     private let localIndex: [BuildingModel]
+    /// Used only to name a plan shape for buildings nobody has mapped. Built
+    /// here rather than injected so the fallback needs no wiring at the call
+    /// site, and so it degrades on its own when no key is set.
+    private let analyst: AIAnalyst
 
     public init(vault: SecretsVault,
                 transport: HTTPTransport = URLSessionHTTPTransport(),
@@ -598,6 +603,64 @@ public actor BuildingSearchService {
         self.vault = vault
         self.client = ResilientClient(transport: transport, requestsPerSecond: 3, burst: 6)
         self.localIndex = localLibrary
+        self.analyst = AIAnalyst(vault: vault, transport: transport)
+    }
+
+    /// What the plan looks like from above, when nobody has traced it.
+    struct ResolvedPlan: Sendable {
+        var shape: PlanShape
+        var confidence: Double
+        var reason: String
+        var source: FactProvenance.Source
+    }
+
+    /// Determines the plan shape, cheapest source first.
+    ///
+    /// The prose is tried before the model, and not only to save a request:
+    /// when a description already says "cruciform", reading that word is both
+    /// free and more trustworthy than asking a model to recall the building.
+    /// The model is consulted only when the text is silent, and its answer is
+    /// recorded as an inference so the import screen can show it as one.
+    private func planShape(for candidate: BuildingCandidate,
+                           facts: BuildingFactSet) async -> ResolvedPlan? {
+        let described = [candidate.snippet, candidate.subtitle,
+                         facts.facts["notes"]?.value ?? ""].joined(separator: " ")
+        if let shape = PlanShape.parse(described) {
+            return ResolvedPlan(shape: shape, confidence: 0.7,
+                                reason: "Described as \(shape.label.lowercased()) in the source text",
+                                source: .webSearch)
+        }
+
+        guard await analyst.hasAnyProvider else { return nil }
+
+        let options = PlanShape.allCases.map(\.rawValue).joined(separator: ", ")
+        let request = AnalystRequest(
+            task: .buildingSummary,
+            subject: candidate.name,
+            facts: [
+                AnalystFact(label: "Building", value: candidate.name),
+                AnalystFact(label: "Location", value: candidate.subtitle),
+                AnalystFact(label: "Description", value: String(described.prefix(400))),
+            ],
+            question: "What is this building's footprint shape seen from directly above? "
+                    + "Answer with exactly one of these words and nothing else: \(options). "
+                    + "If you do not know this specific building, answer: unknown.")
+
+        let answer = await analyst.answer(request)
+        guard answer.value.isAIGenerated else { return nil }
+
+        // Only the first token is read. A model that decides to explain itself
+        // must not be able to turn "rectangular, though the north wing is
+        // circular" into a circular building.
+        let first = answer.value.text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: { $0 == " " || $0 == "\n" || $0 == "." || $0 == "," })
+            .first.map(String.init) ?? ""
+        guard let shape = PlanShape.parse(first) else { return nil }
+
+        return ResolvedPlan(shape: shape, confidence: 0.5,
+                            reason: "Inferred by \(answer.provider); no mapped outline exists",
+                            source: .aiInference)
     }
 
     /// True when at least one live path exists. Wikidata and Overpass need no
@@ -694,6 +757,22 @@ public actor BuildingSearchService {
             providers.append("OpenStreetMap")
         }
 
+        // Plan shape, but only where OSM has not already traced the real one.
+        //
+        // A mapped outline beats any description of one, so this never
+        // overrides it. It exists for the far more common case of a building
+        // nobody has drawn, where the alternative is a rectangle that tells the
+        // user nothing about their own building.
+        if merged.facts["footprint"] == nil,
+           let shape = await planShape(for: candidate, facts: merged) {
+            merged.facts["planShape"] = RetrievedFact(
+                field: "planShape", value: shape.shape.rawValue,
+                provenance: FactProvenance(source: shape.source,
+                                           confidence: shape.confidence,
+                                           detail: shape.reason, retrievedAt: Date()))
+            providers.append(shape.source == .aiInference ? "AI plan shape" : "Described plan")
+        }
+
         if !candidate.snippet.isEmpty {
             let extracted = SnippetExtractor.facts(from: candidate.snippet)
             if !extracted.isEmpty {
@@ -739,9 +818,20 @@ public actor BuildingSearchService {
                 detail: "Derived from the storey count at 3.4 m per storey", retrievedAt: Date())
         }
 
-        let footprint: [Coordinate2D] = {
+        let mapped: [Coordinate2D] = {
             guard let raw = string("footprint"), let data = raw.data(using: .utf8) else { return [] }
             return (try? JSONDecoder().decode([Coordinate2D].self, from: data)) ?? []
+        }()
+
+        // A traced outline wins outright. Failing that, the plan shape becomes
+        // a real polygon rather than the rectangle every building used to get.
+        let plannedArea = number("footprintArea") ?? (Double(resolvedStoreys) * 40 + 300)
+        let footprint: [Coordinate2D] = {
+            if !mapped.isEmpty { return mapped }
+            guard let shape = string("planShape").flatMap(PlanShape.init(rawValue:)) else {
+                return []
+            }
+            return shape.polygon(area: plannedArea)
         }()
 
         return BuildingModel(
@@ -752,8 +842,7 @@ public actor BuildingSearchService {
             storeyCount: resolvedStoreys,
             height: resolvedHeight,
             footprintArea: number("footprintArea")
-                ?? (footprint.isEmpty ? Double(resolvedStoreys) * 40 + 300
-                                      : OverpassClient.polygonArea(footprint)),
+                ?? (mapped.isEmpty ? plannedArea : OverpassClient.polygonArea(mapped)),
             footprint: footprint,
             yearBuilt: number("yearBuilt").map(Int.init),
             material: string("material").flatMap(Self.material) ?? .reinforcedConcrete,

@@ -374,6 +374,7 @@ final class BuildingImporter: ObservableObject {
         case "yearBuilt": "Year built"
         case "footprintArea": "Footprint area"
         case "footprint": "Footprint outline"
+        case "planShape": "Plan shape"
         case "material": "Material"
         case "system": "Structural system"
         case "architect": "Architect"

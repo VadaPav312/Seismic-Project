@@ -84,40 +84,55 @@ final class BuildingSceneController: ObservableObject {
 
         // Key light, fill light, and a soft ambient so the massing reads without
         // the scene looking like a product render.
+        // Lit for a dark room.
+        //
+        // The previous values were tuned looking at a bright screen and were
+        // genuinely uncomfortable in the dark — which is the condition this app
+        // is most likely to be opened in. A key light at 780 against the near
+        // black background is most of a stop brighter than the rest of the
+        // interface, and HDR bloom then smeared a halo off every lit edge.
+        //
+        // Roughly 40% off the key, a much dimmer ambient, and no bloom at all.
+        // The massing still reads because the contrast between the lit and
+        // shadowed faces is what makes a shape legible, not the absolute level.
         let key = SCNNode()
         key.light = SCNLight()
         key.light?.type = .directional
-        key.light?.intensity = 780
-        key.light?.color = UIColor(white: 1.0, alpha: 1)
+        key.light?.intensity = 460
+        key.light?.color = UIColor(white: 0.95, alpha: 1)
         key.light?.castsShadow = true
         key.light?.shadowMode = .deferred
-        key.light?.shadowRadius = 8
-        key.light?.shadowColor = UIColor(white: 0, alpha: 0.45)
+        key.light?.shadowRadius = 6
+        key.light?.shadowColor = UIColor(white: 0, alpha: 0.42)
         key.eulerAngles = SCNVector3(-Float.pi / 3.2, Float.pi / 4.5, 0)
         scene.rootNode.addChildNode(key)
 
         let fill = SCNNode()
         fill.light = SCNLight()
         fill.light?.type = .directional
-        fill.light?.intensity = 240
-        fill.light?.color = UIColor(Theme.Palette.accent)
+        fill.light?.intensity = 130
+        // Desaturated: the accent at full strength tinted the whole model, and
+        // a cyan building is harder to read as concrete than a grey one.
+        fill.light?.color = UIColor(Theme.Palette.accent.opacity(0.55))
         fill.eulerAngles = SCNVector3(-Float.pi / 6, -Float.pi / 2.2, 0)
         scene.rootNode.addChildNode(fill)
 
         let ambient = SCNNode()
         ambient.light = SCNLight()
         ambient.light?.type = .ambient
-        ambient.light?.intensity = 240
-        ambient.light?.color = UIColor(white: 0.55, alpha: 1)
+        ambient.light?.intensity = 150
+        ambient.light?.color = UIColor(white: 0.42, alpha: 1)
         scene.rootNode.addChildNode(ambient)
 
         cameraNode.camera = SCNCamera()
         cameraNode.camera?.fieldOfView = 42
         cameraNode.camera?.zNear = 0.2
         cameraNode.camera?.zFar = 4000
-        cameraNode.camera?.wantsHDR = true
-        cameraNode.camera?.bloomIntensity = 0.18
-        cameraNode.camera?.bloomThreshold = 0.85
+        // HDR and bloom off: bloom was the glare, and the tone mapping pass it
+        // requires is a full-screen GPU cost per frame for an effect that adds
+        // nothing to a structural diagram.
+        cameraNode.camera?.wantsHDR = false
+        cameraNode.camera?.bloomIntensity = 0
         scene.rootNode.addChildNode(cameraNode)
 
         scene.rootNode.addChildNode(buildingRoot)
@@ -132,6 +147,7 @@ final class BuildingSceneController: ObservableObject {
 
         buildingRoot.childNodes.forEach { $0.removeFromParentNode() }
         storeyNodes.removeAll()
+        appliedDamageState.removeAll()
 
         storeyHeight = building.height / Double(max(building.storeyCount, 1))
         footprint = building.footprint.isEmpty
@@ -186,21 +202,92 @@ final class BuildingSceneController: ObservableObject {
         // which is enough to make the massing legible without modelling columns.
         let container = SCNNode()
 
-        let body = SCNBox(width: CGFloat(width), height: CGFloat(height * 0.86),
-                          length: CGFloat(depth), chamferRadius: CGFloat(min(width, depth) * 0.015))
-        let bodyNode = SCNNode(geometry: body)
+        let bodyNode = storeyNode(height: height * 0.86, inset: 0,
+                                  width: width, depth: depth)
         bodyNode.name = "body"
         container.addChildNode(bodyNode)
 
-        let slab = SCNBox(width: CGFloat(width * 1.04), height: CGFloat(height * 0.10),
-                          length: CGFloat(depth * 1.04), chamferRadius: 0)
-        let slabNode = SCNNode(geometry: slab)
+        let slabNode = storeyNode(height: height * 0.10, inset: -0.04,
+                                  width: width, depth: depth)
         slabNode.name = "slab"
         slabNode.position = SCNVector3(0, Float(height * 0.46), 0)
         container.addChildNode(slabNode)
 
         container.name = "storey-\(index + 1)"
         return container
+    }
+
+    /// One storey's solid: the real mapped outline where there is one, a box
+    /// where there is not.
+    ///
+    /// Every imported building used to come out a rectangle. The cause was not
+    /// missing data — the Overpass import already fetches the OpenStreetMap
+    /// footprint polygon and stores it on the model — but this function, which
+    /// took only the polygon's *bounding box* and built an `SCNBox` from it. So
+    /// a cruciform tower, an L-shaped block and a circular drum all rendered as
+    /// the same slab, and the one genuinely site-specific fact the importer had
+    /// gone and found was discarded at the last step.
+    ///
+    /// Extruding the outline is also structurally honest: torsional response
+    /// depends on how mass sits about the centre of rigidity, and a shape the
+    /// user can recognise as their own building is the thing that makes the
+    /// rest of the model believable.
+    private func storeyNode(height: Double, inset: Double,
+                            width: Double, depth: Double) -> SCNNode {
+        let scale = 1 - inset
+        let thickness = max(height, 0.01)
+
+        if let path = footprintPath(scale: scale) {
+            let shape = SCNShape(path: path, extrusionDepth: CGFloat(thickness))
+            shape.chamferRadius = 0
+            let node = SCNNode(geometry: shape)
+            // `SCNShape` lays its path in the xy plane and extrudes along z, so
+            // the solid comes out standing on its side. Rotating a quarter turn
+            // about x lays the plan flat and makes the extrusion vertical.
+            node.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
+            return node
+        }
+
+        let box = SCNBox(width: CGFloat(width * scale), height: CGFloat(thickness),
+                         length: CGFloat(depth * scale),
+                         chamferRadius: CGFloat(min(width, depth) * 0.015))
+        return SCNNode(geometry: box)
+    }
+
+    /// The footprint as a path centred on the origin, or nil if it is too
+    /// degenerate to extrude.
+    ///
+    /// Centring matters: the polygon arrives in metres relative to the
+    /// building's anchor, so an un-centred path would put the tower off to one
+    /// side of its own ground plane and out of the camera's framing.
+    private func footprintPath(scale: Double) -> UIBezierPath? {
+        let points = footprint
+        // Three points is the minimum for an area; the closing duplicate that
+        // GeoJSON-style rings carry is dropped so it cannot create a zero
+        // length edge.
+        var ring = points
+        if let first = ring.first, let last = ring.last,
+           abs(first.x - last.x) < 1e-6, abs(first.y - last.y) < 1e-6 {
+            ring.removeLast()
+        }
+        guard ring.count >= 3 else { return nil }
+
+        let box = Polygon.boundingBox(ring)
+        let centreX = (box.min.x + box.max.x) / 2
+        let centreY = (box.min.y + box.max.y) / 2
+        guard box.max.x - box.min.x > 0.5, box.max.y - box.min.y > 0.5 else { return nil }
+
+        let path = UIBezierPath()
+        for (index, point) in ring.enumerated() {
+            // The polygon's y is a ground-plane axis; the extrusion happens
+            // along the shape's own z, and the node is rotated flat below.
+            let position = CGPoint(x: (point.x - centreX) * scale,
+                                   y: (point.y - centreY) * scale)
+            if index == 0 { path.move(to: position) } else { path.addLine(to: position) }
+        }
+        path.close()
+        path.flatness = 0.15
+        return path
     }
 
     /// A *finite* ground plane, deliberately not `SCNFloor`.
@@ -251,6 +338,7 @@ final class BuildingSceneController: ObservableObject {
     // MARK: Styling
 
     private func applyStyle() {
+        appliedDamageState.removeAll()
         for (index, node) in storeyNodes.enumerated() {
             let fraction = storeyNodes.count > 1
                 ? Double(index) / Double(storeyNodes.count - 1) : 0
@@ -315,15 +403,30 @@ final class BuildingSceneController: ObservableObject {
             let offset = index < displacements.count ? Float(displacements[index]) : 0
             node.position.x = offset * exaggeration
 
-            if style == .driftHeatMap, index < drifts.count {
-                let stateIndex = damageStateIndex(forDrift: abs(drifts[index]))
-                let color = UIColor(DamageStateColors.color(for: stateIndex))
-                for child in node.childNodes {
-                    child.geometry?.firstMaterial?.diffuse.contents = color
-                }
+            guard style == .driftHeatMap, index < drifts.count else { continue }
+
+            // Only touch the material when the damage state actually changes.
+            //
+            // This previously rebuilt a UIColor and reassigned `diffuse.contents`
+            // for every child of every storey on every frame. Writing to a
+            // material invalidates it and forces SceneKit to re-upload it to the
+            // GPU, so a sixty-storey tower was pushing thousands of pointless
+            // material updates a second. The state is one of five values and
+            // changes a handful of times in an entire event.
+            let stateIndex = damageStateIndex(forDrift: abs(drifts[index]))
+            guard appliedDamageState[index] != stateIndex else { continue }
+            appliedDamageState[index] = stateIndex
+
+            let color = UIColor(DamageStateColors.color(for: stateIndex))
+            for child in node.childNodes {
+                child.geometry?.firstMaterial?.diffuse.contents = color
             }
         }
     }
+
+    /// The damage state currently written into each storey's material, so a
+    /// frame that changes nothing costs nothing.
+    private var appliedDamageState: [Int: Int] = [:]
 
     /// Permanently tints a storey that has been damaged, so the damage stays
     /// visible after the shaking stops — as it does in reality.
@@ -433,8 +536,20 @@ struct BuildingSceneView: UIViewRepresentable {
         view.autoenablesDefaultLighting = false
         view.antialiasingMode = .multisampling2X
         view.backgroundColor = UIColor(Theme.Palette.background)
-        view.preferredFramesPerSecond = 60
-        view.rendersContinuously = true
+
+        // 30 fps, and only while something is moving.
+        //
+        // `rendersContinuously = true` makes SceneKit redraw the scene forever
+        // at the full frame rate whether or not a single pixel has changed —
+        // so a stationary building was costing a full GPU pass sixty times a
+        // second, warming the phone and starving the rest of the interface.
+        // SceneKit already redraws on demand when a node moves or a gesture
+        // arrives, so the continuous mode buys nothing here.
+        //
+        // A structural response at 30 fps is indistinguishable from 60: the
+        // motion being shown has a period near a second.
+        view.preferredFramesPerSecond = 30
+        view.rendersContinuously = false
 
         // Double tap resets the camera — the standard gesture, and the one
         // people try instinctively after spinning a model into a strange angle.
