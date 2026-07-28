@@ -1,8 +1,10 @@
 import SwiftUI
+import UIKit
 import SeismicCore
 import SeismicSignal
 import SeismicStructures
 import SeismicData
+import SeismicServices
 
 /// The safety verdict, and every piece of evidence behind it.
 ///
@@ -13,8 +15,11 @@ import SeismicData
 /// worse than useless.
 struct AssessScreen: View {
     @EnvironmentObject private var env: AppEnvironment
+    @EnvironmentObject private var services: ServiceHub
+    @EnvironmentObject private var voice: VoiceController
     @State private var showingReport = false
     @State private var expandedEvidence: UUID?
+    @State private var showingPhotoCapture = false
 
     private var assessment: Assessment? { env.latestAssessment }
     private var building: BuildingModel? { env.selectedBuilding }
@@ -28,6 +33,7 @@ struct AssessScreen: View {
                     evidenceSection(assessment)
                     reentrySection(assessment)
                     narrativeSection(assessment)
+                    photoSection(assessment)
                     ledgerSection(assessment)
                     disclaimer
                     actions(assessment)
@@ -41,6 +47,18 @@ struct AssessScreen: View {
             if let assessment, let building {
                 ReportPreviewSheet(assessment: assessment, building: building)
             }
+        }
+        .sheet(isPresented: $showingPhotoCapture) {
+            if let building {
+                DamageCaptureSheet(building: building,
+                                   assessmentID: assessment?.id)
+            }
+        }
+        .task(id: assessment?.id) {
+            // The narrative is produced on arrival rather than on a button, so
+            // the explanation is simply there when the screen is.
+            guard let assessment, let building else { return }
+            await services.narrative(for: assessment, building: building)
         }
     }
 
@@ -194,20 +212,119 @@ struct AssessScreen: View {
         .instrumentPanel()
     }
 
+    /// The paragraph under the verdict.
+    ///
+    /// Whoever wrote it is stated, always. An explanation from a language model
+    /// and an explanation assembled on the device are both fine; being unable to
+    /// tell which one you are reading is not.
     private func narrativeSection(_ assessment: Assessment) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+        let generated = services.narrative(for: assessment.id)
+        let isWorking = services.generatingNarratives.contains(assessment.id)
+
+        return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
             HStack {
                 SectionLabel("Analysis", systemImage: "text.alignleft")
-                if assessment.narrativeIsAIGenerated {
-                    StatusPill(text: "AI generated", systemImage: "sparkles",
-                               tint: Theme.Palette.accent)
+                if let generated {
+                    StatusPill(text: generated.value.isAIGenerated
+                               ? generated.value.provider : "On device",
+                               systemImage: generated.value.isAIGenerated
+                               ? "sparkles" : "iphone",
+                               tint: generated.value.isAIGenerated
+                               ? Theme.Palette.accent : Theme.Palette.textSecondary)
                 }
             }
 
-            Text(assessment.narrative)
-                .font(Theme.Typography.body)
-                .foregroundStyle(Theme.Palette.textPrimary)
-                .fixedSize(horizontal: false, vertical: true)
+            if isWorking {
+                VStack(alignment: .leading, spacing: 8) {
+                    SkeletonBlock(height: 12)
+                    SkeletonBlock(height: 12)
+                    SkeletonBlock(height: 12, width: 220)
+                }
+            } else {
+                Text(generated?.value.text ?? assessment.narrative)
+                    .font(Theme.Typography.body)
+                    .foregroundStyle(Theme.Palette.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            // When a model produced a figure nobody measured, the answer is
+            // discarded and the reason is shown rather than hidden.
+            if let note = generated?.note {
+                Text(note)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            HStack(spacing: Theme.Metrics.spacing) {
+                Button {
+                    if voice.isSpeaking { voice.stopSpeaking() }
+                    else {
+                        voice.speak(spokenReadout(assessment,
+                                                  narrative: generated?.value.text),
+                                    urgency: .calm, force: true)
+                    }
+                } label: {
+                    Label(voice.isSpeaking ? "Stop" : "Read this out",
+                          systemImage: voice.isSpeaking ? "stop.fill" : "speaker.wave.2")
+                        .font(Theme.Typography.caption)
+                }
+                .buttonStyle(SecondaryButtonStyle())
+
+                if voice.isSpeaking {
+                    Text("Voice: \(voice.voiceProvider)")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .instrumentPanel()
+    }
+
+    /// Spoken form: the verdict first, then what it means, then the analysis.
+    /// Somebody listening rather than reading needs the conclusion immediately.
+    private func spokenReadout(_ assessment: Assessment, narrative: String?) -> String {
+        var parts = [assessment.verdict.placard + ".", assessment.verdict.plainMeaning]
+        if let narrative, !narrative.isEmpty { parts.append(narrative) }
+        return parts.joined(separator: " ")
+    }
+
+    /// Photographs, which are the one piece of evidence a sensor cannot supply.
+    ///
+    /// The value is not in any single photograph but in the pair: the same
+    /// corner before and after, where a crack that has visibly widened settles
+    /// an argument that a period measurement can only ever suggest.
+    private func photoSection(_ assessment: Assessment) -> some View {
+        let notes = env.store.notesList().filter { $0.buildingID == building?.id }
+
+        return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+            SectionLabel("Photographs", systemImage: "camera",
+                         trailing: notes.isEmpty ? nil : "\(notes.count)")
+
+            if notes.isEmpty {
+                Text("No photographs yet. A photograph of the same place before and after an "
+                     + "event is worth more than any single description of one.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 8) {
+                        ForEach(notes.prefix(8)) { note in
+                            DamageNoteThumbnail(note: note)
+                        }
+                    }
+                }
+            }
+
+            Button {
+                showingPhotoCapture = true
+            } label: {
+                Label("Add a photograph", systemImage: "camera.fill")
+                    .font(Theme.Typography.caption)
+            }
+            .buttonStyle(SecondaryButtonStyle())
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .instrumentPanel()
@@ -331,6 +448,8 @@ struct ReportPreviewSheet: View {
         }
     }
 
+    @State private var exportedPDF: URL?
+
     var body: some View {
         NavigationStack {
             ScrollView {
@@ -356,14 +475,67 @@ struct ReportPreviewSheet: View {
                     Button("Close") { dismiss() }
                 }
                 ToolbarItem(placement: .primaryAction) {
-                    ShareLink(item: ReportBuilder.plainText(assessment: assessment,
-                                                            building: building)) {
+                    Menu {
+                        Button {
+                            exportPDF()
+                        } label: {
+                            Label("Share as PDF", systemImage: "doc.fill")
+                        }
+                        Button {
+                            printPDF()
+                        } label: {
+                            Label("Print", systemImage: "printer")
+                        }
+                        ShareLink(item: ReportBuilder.plainText(assessment: assessment,
+                                                                building: building)) {
+                            Label("Share as plain text", systemImage: "text.alignleft")
+                        }
+                    } label: {
                         Image(systemName: "square.and.arrow.up")
                     }
                 }
             }
+            .sheet(item: $exportedPDF) { url in
+                ActivityShareSheet(items: [url])
+            }
         }
     }
+
+    /// A real PDF, written to a real file with a real name, because a document
+    /// somebody may hand to an insurer should not arrive called "Document.pdf".
+    private func exportPDF() {
+        exportedPDF = PDFExport.writeToTemporaryFile(assessment: assessment,
+                                                     building: building, format: format)
+        Haptics.shared.play(.selection)
+    }
+
+    private func printPDF() {
+        let data = PDFExport.render(assessment: assessment, building: building, format: format)
+        let info = UIPrintInfo(dictionary: nil)
+        info.jobName = "Seismic assessment — \(building.name)"
+        info.outputType = .general
+        let controller = UIPrintInteractionController.shared
+        controller.printInfo = info
+        controller.printingItem = data
+        controller.present(animated: true)
+    }
+}
+
+/// `UIActivityViewController`, for the cases SwiftUI's `ShareLink` cannot cover
+/// — here, sharing a file that is generated at the moment the button is pressed.
+struct ActivityShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+
+/// So a `URL` can drive `.sheet(item:)` directly.
+extension URL: @retroactive Identifiable {
+    public var id: String { absoluteString }
 }
 
 #Preview {

@@ -1,9 +1,11 @@
 import SwiftUI
 import SeismicCore
+import SeismicServices
 
 /// The top-level destinations.
 enum AppSection: String, CaseIterable, Identifiable, Hashable {
-    case home, monitor, simulator, map, library, node, assess, feed, settings
+    case home, monitor, simulator, map, library, node, assess, feed
+    case prepare, household, settings
     var id: String { rawValue }
 
     var title: String {
@@ -16,6 +18,8 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .node: "Node"
         case .assess: "Assess"
         case .feed: "Feed"
+        case .prepare: "Preparedness"
+        case .household: "Household"
         case .settings: "Settings"
         }
     }
@@ -30,6 +34,8 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .node: "sensor.tag.radiowaves.forward"
         case .assess: "checkmark.shield"
         case .feed: "globe.americas"
+        case .prepare: "checklist"
+        case .household: "person.3"
         case .settings: "gearshape"
         }
     }
@@ -37,11 +43,15 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
     /// The five that get a tab. The rest are reached from Home and from the
     /// More menu — a bar of nine icons is a bar nobody can use in a hurry.
     static let primary: [AppSection] = [.home, .monitor, .simulator, .map, .library]
-    static let secondary: [AppSection] = [.assess, .node, .feed, .settings]
+    static let secondary: [AppSection] = [.assess, .node, .feed, .prepare,
+                                         .household, .settings]
 }
 
 struct RootView: View {
     @EnvironmentObject private var env: AppEnvironment
+    @EnvironmentObject private var services: ServiceHub
+    @EnvironmentObject private var voice: VoiceController
+    @EnvironmentObject private var notifications: NotificationCentre
     /// Honours `SEISMIC_INITIAL_TAB` so a demo, a screenshot run or a UI test
     /// can open straight onto a given screen instead of navigating there.
     @State private var selection: AppSection =
@@ -72,6 +82,65 @@ struct RootView: View {
         .animation(Theme.Motion.standard, value: env.activeEvent?.id)
         .animation(Theme.Motion.gentle, value: env.isBootstrapped)
         .animation(Theme.Motion.gentle, value: env.didCompleteOnboarding)
+        // A recognised command is consumed here rather than in each screen, so
+        // "show the map" works from wherever the user happens to be.
+        .onChange(of: voice.recognisedCommand) { _, command in
+            guard let command else { return }
+            perform(command)
+        }
+        .onChange(of: env.latestAssessment?.id) { _, _ in announceAssessment() }
+        .alert("Confirm out loud commands", isPresented: Binding(
+            get: { voice.pendingConfirmation != nil },
+            set: { if !$0 { voice.cancelPending() } })) {
+            Button("Do it", role: .destructive) { voice.confirmPending() }
+            Button("Cancel", role: .cancel) { voice.cancelPending() }
+        } message: {
+            Text(voice.pendingConfirmation.map {
+                "\($0.confirmation) This one moves something physical, so it needs a tap as "
+                + "well as a word."
+            } ?? "")
+        }
+    }
+
+    /// Commands that only navigate run immediately. Anything physical has
+    /// already been gated behind the confirmation alert above.
+    private func perform(_ command: VoiceCommand) {
+        _ = voice.consumeCommand()
+        switch command {
+        case .status, .isItSafe, .readAssessment:
+            selection = .home
+            if let assessment = env.latestAssessment {
+                voice.speak(assessment.verdict.placard + ". "
+                            + assessment.verdict.plainMeaning, urgency: .calm, force: true)
+            } else {
+                voice.speak("There is no assessment yet. The building has not been shaken "
+                            + "since the baseline was taken.", urgency: .calm, force: true)
+            }
+        case .startDrill:
+            env.startDrill(fireActuators: false)
+        case .measureNow:
+            env.session.send(.requestPeriodMeasurement)
+            selection = .monitor
+        case .closeGas:
+            env.session.send(.fireActuator(.gasValve))
+        case .callHousehold:
+            selection = .household
+        case .showMap:
+            selection = .map
+        case .stopSpeaking:
+            voice.stopSpeaking()
+        }
+        Haptics.shared.play(.selection)
+    }
+
+    /// The notification that goes out when a verdict lands. Sent from here
+    /// because the notification centre is a view-layer concern — the assessment
+    /// itself is computed whether or not anybody is allowed to be told.
+    private func announceAssessment() {
+        guard let assessment = env.latestAssessment,
+              let building = env.selectedBuilding,
+              Date().timeIntervalSince(assessment.createdAt) < 60 else { return }
+        notifications.announceAssessment(assessment, buildingName: building.name)
     }
 
     private var mainInterface: some View {
@@ -129,6 +198,8 @@ struct RootView: View {
         case .node: NodeScreen()
         case .assess: AssessScreen()
         case .feed: GlobalFeedScreen()
+        case .prepare: PreparednessScreen()
+        case .household: HouseholdScreen()
         case .settings: SettingsScreen()
         }
     }

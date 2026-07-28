@@ -20,6 +20,10 @@ struct SimulatorScreen: View {
     /// Starts collapsed so the building gets the whole screen. The controls are
     /// one tap away; a 3D view with half of it behind a panel is not.
     @State private var controlsExpanded = false
+    @State private var showsSweep = false
+    @State private var showsComparison = false
+    @State private var showsAR = false
+    @StateObject private var sonifier = PeriodSonifier()
     @State private var showsModeShapes = false
     @State private var selectedMode = 1
     @State private var intensityScale: Double = 1.0
@@ -42,7 +46,20 @@ struct SimulatorScreen: View {
             controlPanel
         }
         .onAppear { setUp() }
+        .onDisappear { sonifier.stop() }
         .onChange(of: selectedBuildingID) { _, _ in rebuild() }
+        .sheet(isPresented: $showsSweep) {
+            if let building { ResonanceSweepView(building: building) }
+        }
+        .sheet(isPresented: $showsComparison) {
+            if let record {
+                ComparisonView(record: record, candidates: env.buildings,
+                               initialLeft: selectedBuildingID)
+            }
+        }
+        .sheet(isPresented: $showsAR) {
+            if let building { ARPlacementView(building: building) }
+        }
         .onReceive(runner.$frame) { frame in
             guard let frame else { return }
             controller.apply(displacements: frame.displacements, drifts: frame.drifts)
@@ -175,8 +192,10 @@ struct SimulatorScreen: View {
                         buildingPicker
                         recordPicker
                         transport
+                        exploreControls
                         whatIfControls
                         modeControls
+                        sonificationControls
                     }
                     .padding(.horizontal, Theme.Metrics.screenPadding)
                     .padding(.bottom, Theme.Metrics.spacingLoose)
@@ -364,6 +383,83 @@ struct SimulatorScreen: View {
                     .foregroundStyle(Theme.Palette.textSecondary)
             }
             Slider(value: value, in: range).tint(Theme.Palette.accent)
+        }
+    }
+
+    /// The three ways of looking at the same building that are not simply
+    /// pressing play: the resonance curve, a second building beside it, and the
+    /// thing itself standing on the floor in front of you.
+    private var exploreControls: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+            SectionLabel("Explore", systemImage: "square.grid.2x2")
+            HStack(spacing: 8) {
+                exploreButton("Resonance", "waveform.path.badge.plus") { showsSweep = true }
+                exploreButton("Side by side", "rectangle.split.2x1") { showsComparison = true }
+                exploreButton("In the room", "arkit") { showsAR = true }
+            }
+        }
+    }
+
+    private func exploreButton(_ title: String, _ image: String,
+                               action: @escaping () -> Void) -> some View {
+        Button {
+            Haptics.shared.play(.selection)
+            action()
+        } label: {
+            VStack(spacing: 4) {
+                Image(systemName: image).font(.system(size: 15))
+                Text(title).font(.system(size: 10, weight: .medium))
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 50)
+        }
+        .buttonStyle(SecondaryButtonStyle())
+    }
+
+    /// The building, transposed six octaves up so it can be heard.
+    ///
+    /// After a run there are two periods to compare — before and after the
+    /// softening — and playing them together turns the change into a throb you
+    /// hear rather than a percentage you read.
+    private var sonificationControls: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+            SectionLabel("Listen", systemImage: "waveform")
+
+            HStack(spacing: 8) {
+                Button {
+                    if sonifier.isPlaying { sonifier.stop() }
+                    else if let building { sonifier.play(period: building.empiricalPeriod) }
+                } label: {
+                    Label(sonifier.isPlaying && sonifier.mode == .single ? "Stop" : "This building",
+                          systemImage: "speaker.wave.2")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(SecondaryButtonStyle())
+
+                if let result = runner.result, result.periodChangePercent > 0.2 {
+                    Button {
+                        if sonifier.isPlaying && sonifier.mode == .beat { sonifier.stop() }
+                        else {
+                            sonifier.playComparison(before: result.initialPeriod,
+                                                    after: result.finalPeriod)
+                        }
+                    } label: {
+                        Label("Before vs after", systemImage: "waveform.badge.exclamationmark")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                }
+            }
+
+            if sonifier.isPlaying {
+                Text(sonifier.describedPitch)
+                    .font(Theme.Typography.numericSmall)
+                    .foregroundStyle(Theme.Palette.accent)
+                Text(sonifier.mode.explanation)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

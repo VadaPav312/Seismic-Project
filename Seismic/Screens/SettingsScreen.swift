@@ -1,15 +1,36 @@
 import SwiftUI
 import SeismicCore
 import SeismicData
+import SeismicServices
 
 /// Settings, including the API key manager.
 struct SettingsScreen: View {
     @EnvironmentObject private var env: AppEnvironment
+    @EnvironmentObject private var services: ServiceHub
+    @EnvironmentObject private var voice: VoiceController
+    @EnvironmentObject private var notifications: NotificationCentre
     @State private var showingLedger = false
     @State private var showingGlossary = false
 
     var body: some View {
         List {
+            Section("Account") {
+                NavigationLink { HouseholdScreen().seismicBackground() } label: {
+                    Label {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(services.account?.displayName ?? "Not signed in")
+                            Text(services.household.map { "\($0.members.count) in \($0.name)" }
+                                 ?? "Sign in to back up and share, or carry on without")
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                        }
+                    } icon: {
+                        Image(systemName: services.account?.provider.systemImage
+                              ?? "person.crop.circle")
+                    }
+                }
+            }
+
             Section {
                 NavigationLink { APIKeysScreen().seismicBackground() } label: {
                     Label {
@@ -74,19 +95,52 @@ struct SettingsScreen: View {
                 }
             }
 
-            Section("Accessibility and behaviour") {
+            Section {
                 Toggle(isOn: $hapticsEnabled) {
                     Label("Haptics", systemImage: "iphone.radiowaves.left.and.right")
                 }
-                Toggle(isOn: $spokenGuidance) {
+
+                Toggle(isOn: $voice.speaksAutomatically) {
                     VStack(alignment: .leading, spacing: 2) {
-                        Label("Spoken guidance during events", systemImage: "speaker.wave.2")
+                        Label("Spoken guidance", systemImage: "speaker.wave.2")
                         Text("Instructions are read aloud so you do not have to look at the "
-                             + "screen while getting under a table.")
+                             + "screen while getting under a table. The earthquake warning "
+                             + "itself is spoken either way.")
                             .font(Theme.Typography.caption)
                             .foregroundStyle(Theme.Palette.textTertiary)
                     }
                 }
+
+                Toggle(isOn: $voice.isVoiceControlEnabled) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Voice control", systemImage: "mic")
+                        Text(voice.isSpeechRecognitionAvailable
+                             ? "Ask \"is it safe\" or \"read the assessment\" without touching "
+                               + "the phone. Anything that fires an actuator still needs a tap."
+                             : "Speech recognition is not available on this device.")
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                    }
+                }
+                .disabled(!voice.isSpeechRecognitionAvailable)
+
+                LabeledContent("Voice") {
+                    Text(voice.voiceProvider)
+                        .font(Theme.Typography.numericSmall)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                }
+            } header: {
+                Text("Accessibility and behaviour")
+            } footer: {
+                if let error = voice.listeningError {
+                    Text(error)
+                }
+            }
+
+            Section {
+                NotificationSettingsSection(centre: notifications)
+                    .listRowInsets(EdgeInsets())
+                    .listRowBackground(Color.clear)
             }
 
             Section {
@@ -150,7 +204,6 @@ struct SettingsScreen: View {
     @State private var showingExport = false
     @State private var exportedData: Data?
     @AppStorage("hapticsEnabled") private var hapticsEnabled = true
-    @AppStorage("spokenGuidance") private var spokenGuidance = true
 }
 
 /// Per-key management, with the status the specification calls for.

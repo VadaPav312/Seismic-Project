@@ -2,6 +2,7 @@ import SwiftUI
 import SeismicCore
 import SeismicGeo
 import SeismicData
+import SeismicServices
 
 /// Earthquakes worldwide, tappable straight into the simulator.
 ///
@@ -16,6 +17,14 @@ struct GlobalFeedScreen: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: Theme.Metrics.spacing) {
+                Picker("Window", selection: $feed.window) {
+                    ForEach(EarthquakeFeedService.Window.allCases) { window in
+                        Text(window.label).tag(window)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .onChange(of: feed.window) { _, _ in Task { await reload() } }
+
                 if feed.isLoading && feed.events.isEmpty {
                     ForEach(0..<5, id: \.self) { _ in
                         VStack(alignment: .leading, spacing: 8) {
@@ -35,7 +44,7 @@ struct GlobalFeedScreen: View {
                                 + "bundled records instead. They shake buildings exactly the "
                                 + "same way.",
                             actionTitle: "Try again",
-                            action: { Task { await feed.load(fallback: env.earthquakes) } })
+                            action: { Task { await reload() } })
                     }
 
                     ForEach(feed.events) { event in
@@ -48,8 +57,18 @@ struct GlobalFeedScreen: View {
             }
             .padding(Theme.Metrics.screenPadding)
         }
-        .refreshable { await feed.load(fallback: env.earthquakes) }
-        .task { await feed.load(fallback: env.earthquakes) }
+        .refreshable { await reload() }
+        .task { await reload() }
+    }
+
+    /// The reference point is the selected building, not the device's location:
+    /// what a user wants to know is what an earthquake did to *their building*,
+    /// which is usually somewhere they are not standing at the time.
+    private func reload() async {
+        let reference = env.selectedBuilding.map {
+            GeoPoint(latitude: $0.latitude, longitude: $0.longitude)
+        }
+        await feed.load(fallback: env.earthquakes, userLocation: reference)
     }
 }
 
@@ -128,7 +147,13 @@ struct EarthquakeFeedRow: View {
     }
 }
 
-/// Fetches the live feed, and falls back cleanly.
+/// Turns the fetched feed into rows, and works out what each event would have
+/// meant *here*.
+///
+/// The fetching itself belongs to `EarthquakeFeedService`, which is tested,
+/// cached and shared; what this adds is the part that is specific to the person
+/// holding the phone — how far away it was, and what intensity that implies at
+/// their building.
 @MainActor
 final class EarthquakeFeed: ObservableObject {
 
@@ -147,77 +172,46 @@ final class EarthquakeFeed: ObservableObject {
     @Published private(set) var events: [Event] = []
     @Published private(set) var isLoading = false
     @Published private(set) var isUsingBundledData = false
+    @Published private(set) var origin: ResultOrigin = .live
+    @Published private(set) var note: String?
+    @Published var window: EarthquakeFeedService.Window = .pastDay
 
-    /// The USGS feed needs no key, which is worth stating plainly because a
-    /// reader will assume otherwise.
-    private let feedURL = URL(string:
-        "https://earthquake.usgs.gov/earthquakes/feed/v1.0/summary/2.5_day.geojson")!
+    private let service = EarthquakeFeedService()
 
     func load(fallback: [EarthquakeRecord], userLocation: GeoPoint? = nil) async {
         isLoading = true
         defer { isLoading = false }
 
-        do {
-            var request = URLRequest(url: feedURL)
-            request.timeoutInterval = 8
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-                throw URLError(.badServerResponse)
-            }
-            let decoded = try JSONDecoder().decode(USGSResponse.self, from: data)
-            events = decoded.features.compactMap { feature in
-                guard let magnitude = feature.properties.mag,
-                      feature.geometry.coordinates.count >= 3 else { return nil }
-                let longitude = feature.geometry.coordinates[0]
-                let latitude = feature.geometry.coordinates[1]
-                let depth = feature.geometry.coordinates[2]
+        let result = await service.recent(window)
+        origin = result.origin
+        note = result.note
+        isUsingBundledData = result.origin == .seeded
 
-                var event = Event(
-                    id: feature.id, magnitude: magnitude,
-                    place: feature.properties.place ?? "Unknown location",
-                    time: Date(timeIntervalSince1970: feature.properties.time / 1000),
-                    depthKm: depth, latitude: latitude, longitude: longitude)
+        events = result.value.map { record in
+            var event = Event(
+                id: record.id.uuidString,
+                magnitude: record.magnitude,
+                place: isUsingBundledData ? "\(record.name) (\(record.year))" : record.name,
+                time: record.originTime
+                    ?? Calendar.current.date(from: DateComponents(year: record.year))
+                    ?? Date(),
+                depthKm: record.depthKm,
+                latitude: record.latitude,
+                longitude: record.longitude)
 
-                if let userLocation {
-                    let distance = Geodesy.distanceKm(
-                        userLocation, GeoPoint(latitude: latitude, longitude: longitude))
-                    event.distanceFromUserKm = distance
-                    event.expectedIntensityHere = AttenuationModel.predict(
-                        magnitude: magnitude, distanceKm: distance, depthKm: depth).mercalli
-                }
-                return event
+            // The number that actually matters to somebody reading this list is
+            // not the magnitude — it is what that magnitude did where they are.
+            if let userLocation, record.latitude != 0 || record.longitude != 0 {
+                let distance = Geodesy.distanceKm(
+                    userLocation, GeoPoint(latitude: record.latitude, longitude: record.longitude))
+                event.distanceFromUserKm = distance
+                event.expectedIntensityHere = AttenuationModel.predict(
+                    magnitude: record.magnitude, distanceKm: distance,
+                    depthKm: record.depthKm).mercalli
             }
-            .sorted { $0.time > $1.time }
-            isUsingBundledData = false
-        } catch {
-            // Offline, rate limited, or the feed changed shape. Any of those is
-            // a reason to show the bundled library rather than nothing.
-            events = fallback.map { record in
-                Event(id: record.id.uuidString, magnitude: record.magnitude,
-                      place: "\(record.name) (\(record.year))",
-                      time: Calendar.current.date(from: DateComponents(year: record.year)) ?? Date(),
-                      depthKm: record.depthKm,
-                      latitude: record.latitude, longitude: record.longitude)
-            }
-            isUsingBundledData = true
+            return event
         }
-    }
-
-    private struct USGSResponse: Decodable {
-        let features: [Feature]
-        struct Feature: Decodable {
-            let id: String
-            let properties: Properties
-            let geometry: Geometry
-        }
-        struct Properties: Decodable {
-            let mag: Double?
-            let place: String?
-            let time: Double
-        }
-        struct Geometry: Decodable {
-            let coordinates: [Double]
-        }
+        .sorted { $0.magnitude > $1.magnitude }
     }
 }
 

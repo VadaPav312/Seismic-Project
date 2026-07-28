@@ -1,0 +1,649 @@
+import XCTest
+import SeismicCore
+@testable import SeismicServices
+
+// MARK: - Transport, retries and rate limiting
+
+final class ResilientClientTests: XCTestCase {
+
+    /// A transport that fails a fixed number of times and then succeeds, so the
+    /// retry path is exercised without a network and without a real delay.
+    final class FlakyTransport: HTTPTransport, @unchecked Sendable {
+        private let failuresBeforeSuccess: Int
+        private let lock = NSLock()
+        private var attempts = 0
+
+        init(failuresBeforeSuccess: Int) { self.failuresBeforeSuccess = failuresBeforeSuccess }
+
+        var attemptCount: Int {
+            lock.lock(); defer { lock.unlock() }
+            return attempts
+        }
+
+        func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+            lock.lock()
+            attempts += 1
+            let current = attempts
+            lock.unlock()
+            if current <= failuresBeforeSuccess {
+                return HTTPResponse(status: 503, body: Data("busy".utf8))
+            }
+            return HTTPResponse(status: 200, body: Data(#"{"ok":true}"#.utf8))
+        }
+    }
+
+    /// Sleeps are replaced so the tests run in microseconds. The backoff maths
+    /// is tested separately in SeismicCore; what matters here is that the
+    /// client retries the right number of times.
+    private func makeClient(_ transport: HTTPTransport,
+                            attempts: Int = 4) -> ResilientClient {
+        ResilientClient(transport: transport,
+                        requestsPerSecond: 1000, burst: 1000,
+                        policy: BackoffPolicy(initialDelay: 0.001, maximumDelay: 0.002,
+                                              multiplier: 2, jitterFraction: 0,
+                                              maximumAttempts: attempts),
+                        sleeper: { _ in })
+    }
+
+    func testRetriesTransientFailureThenSucceeds() async throws {
+        let transport = FlakyTransport(failuresBeforeSuccess: 2)
+        let client = makeClient(transport)
+        let response = try await client.send(HTTPRequest(url: URL(string: "https://x.test/a")!))
+        XCTAssertTrue(response.isSuccess)
+        XCTAssertEqual(transport.attemptCount, 3)
+    }
+
+    func testGivesUpAfterMaximumAttempts() async {
+        let transport = FlakyTransport(failuresBeforeSuccess: 99)
+        let client = makeClient(transport, attempts: 3)
+        do {
+            _ = try await client.send(HTTPRequest(url: URL(string: "https://x.test/a")!))
+            XCTFail("Expected the client to give up")
+        } catch let error as ServiceError {
+            XCTAssertTrue(error.isRetryable)
+            XCTAssertEqual(transport.attemptCount, 3)
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+    }
+
+    /// A rejected key is not a transient failure. Retrying it three times only
+    /// wastes the user's rate limit and delays the fallback.
+    func testDoesNotRetryAuthenticationFailure() async {
+        let stub = StubHTTPTransport()
+        stub.stub("x.test", status: 401, json: #"{"error":"bad key"}"#)
+        let client = makeClient(stub)
+        do {
+            _ = try await client.send(HTTPRequest(url: URL(string: "https://x.test/a")!))
+            XCTFail("Expected a failure")
+        } catch let error as ServiceError {
+            XCTAssertFalse(error.isRetryable)
+            XCTAssertEqual(stub.requests.count, 1)
+            if case .failing = error.keyStatus() {} else {
+                XCTFail("A 401 should mark the key as failing")
+            }
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+    }
+
+    func testRateLimitBecomesRateLimitedStatusWithRetryAfter() async {
+        final class Limited: HTTPTransport, @unchecked Sendable {
+            func send(_ request: HTTPRequest) async throws -> HTTPResponse {
+                HTTPResponse(status: 429, headers: ["retry-after": "30"], body: Data())
+            }
+        }
+        let client = makeClient(Limited(), attempts: 1)
+        do {
+            _ = try await client.send(HTTPRequest(url: URL(string: "https://x.test/a")!))
+            XCTFail("Expected a rate limit")
+        } catch let error as ServiceError {
+            guard case .rateLimited(let retryAfter) = error else {
+                return XCTFail("Expected .rateLimited, got \(error)")
+            }
+            XCTAssertEqual(retryAfter ?? 0, 30, accuracy: 0.001)
+            guard case .rateLimited(let until)? = error.keyStatus() else {
+                return XCTFail("Expected a rate-limited key status")
+            }
+            XCTAssertEqual(until.timeIntervalSinceNow, 30, accuracy: 2)
+        } catch {
+            XCTFail("Unexpected error \(error)")
+        }
+    }
+}
+
+// MARK: - The grounding check
+
+final class GroundingCheckTests: XCTestCase {
+
+    private let request = AnalystRequest(
+        task: .assessmentNarrative,
+        subject: "Test Tower",
+        facts: [AnalystFact(label: "Period before", value: "0.912 s"),
+                AnalystFact(label: "Period after", value: "1.043 s")],
+        constraints: ["The verdict is LIMITED USE."],
+        question: "Explain it.")
+
+    func testAcceptsAnAnswerThatOnlyRestatesSuppliedNumbers() {
+        let answer = "The period moved from 0.912 s to 1.043 s, a change consistent with "
+                   + "reduced stiffness."
+        XCTAssertTrue(GroundingCheck.passes(answer, given: request))
+    }
+
+    func testAcceptsRoundedRestatement() {
+        XCTAssertTrue(GroundingCheck.passes("The period rose from 0.91 to 1.04 seconds.",
+                                            given: request))
+    }
+
+    /// The failure this check exists for: a fluent, plausible sentence
+    /// containing a measurement nobody took.
+    func testRejectsAnInventedMeasurement() {
+        let answer = "The period lengthened by 14.4 per cent and peak drift reached 2.7 per cent."
+        XCTAssertFalse(GroundingCheck.passes(answer, given: request))
+    }
+
+    func testOrdinaryProseNumbersAreAllowed() {
+        XCTAssertTrue(GroundingCheck.passes("There are 2 things worth noting here.",
+                                            given: request))
+    }
+}
+
+// MARK: - The analyst
+
+final class AIAnalystTests: XCTestCase {
+
+    private func vault(_ seed: [String: String] = [:]) -> SecretsVault {
+        SecretsVault(storage: InMemorySecretStorage(seed: seed))
+    }
+
+    private var sampleRequest: AnalystRequest {
+        AnalystRequest(task: .assessmentNarrative, subject: "Test Tower",
+                       facts: [AnalystFact(label: "Period before", value: "0.912 s"),
+                               AnalystFact(label: "Period after", value: "1.043 s")],
+                       constraints: ["The verdict is LIMITED USE."],
+                       question: "Explain what changed.")
+    }
+
+    /// The default experience: no keys at all. It must still produce a real
+    /// paragraph, not an error and not an empty string.
+    func testFallsBackToTheDeviceWithNoKeys() async {
+        let analyst = AIAnalyst(vault: vault(), transport: StubHTTPTransport())
+        let answer = await analyst.answer(sampleRequest)
+        XCTAssertEqual(answer.origin, .onDevice)
+        XCTAssertFalse(answer.value.isAIGenerated)
+        XCTAssertTrue(answer.value.text.contains("LIMITED USE"))
+        XCTAssertGreaterThan(answer.value.text.count, 120)
+    }
+
+    func testUsesCerebrasWhenItsKeyIsPresent() async {
+        let stub = StubHTTPTransport()
+        stub.stub("cerebras.ai", json: """
+        {"choices":[{"message":{"content":"The period moved from 0.912 s to 1.043 s."}}]}
+        """)
+        let analyst = AIAnalyst(vault: vault(["CEREBRAS_API_KEY": "k"]), transport: stub)
+        let answer = await analyst.answer(sampleRequest)
+        XCTAssertEqual(answer.origin, .live)
+        XCTAssertEqual(answer.value.provider, "Cerebras")
+        XCTAssertTrue(answer.value.isAIGenerated)
+    }
+
+    /// A provider that fails must not take the feature down with it.
+    func testFallsThroughToTheNextProvider() async {
+        let stub = StubHTTPTransport()
+        stub.stub("cerebras.ai", failure: .http(status: 401, body: "bad key"))
+        stub.stub("openai.com", json: """
+        {"choices":[{"message":{"content":"Stiffness fell; the period lengthened."}}]}
+        """)
+        let analyst = AIAnalyst(vault: vault(["CEREBRAS_API_KEY": "k", "OPENAI_API_KEY": "k"]),
+                                transport: stub)
+        let answer = await analyst.answer(sampleRequest)
+        XCTAssertEqual(answer.value.provider, "OpenAI")
+        XCTAssertEqual(answer.origin, .live)
+    }
+
+    /// The most important test in this file. A model that invents a number
+    /// must not reach the screen.
+    func testDiscardsAnAnswerContainingAnInventedNumber() async {
+        let stub = StubHTTPTransport()
+        stub.stub("cerebras.ai", json: """
+        {"choices":[{"message":{"content":"Peak drift reached 3.7 per cent, well past the limit."}}]}
+        """)
+        let analyst = AIAnalyst(vault: vault(["CEREBRAS_API_KEY": "k"]), transport: stub)
+        let answer = await analyst.answer(sampleRequest)
+        XCTAssertTrue(answer.value.wasSubstituted)
+        XCTAssertFalse(answer.value.isAIGenerated)
+        XCTAssertFalse(answer.value.text.contains("3.7"))
+        XCTAssertEqual(answer.origin, .onDevice)
+    }
+
+    func testAnthropicRequestIsShapedCorrectly() async throws {
+        let stub = StubHTTPTransport()
+        stub.stub("api.anthropic.com", json: """
+        {"content":[{"type":"text","text":"The period moved from 0.912 s to 1.043 s."}],
+         "stop_reason":"end_turn"}
+        """)
+        let analyst = AIAnalyst(vault: vault(["ANTHROPIC_API_KEY": "k"]), transport: stub)
+        let answer = await analyst.answer(sampleRequest)
+        XCTAssertEqual(answer.value.provider, "Anthropic")
+
+        let request = try XCTUnwrap(stub.requests.first)
+        XCTAssertEqual(request.headers["anthropic-version"], "2023-06-01")
+        XCTAssertEqual(request.headers["x-api-key"], "k")
+        let body = try XCTUnwrap(request.body.flatMap { String(data: $0, encoding: .utf8) })
+        XCTAssertTrue(body.contains("claude-opus-5"))
+        // Adaptive thinking is the model default, so no thinking block is sent;
+        // depth is controlled by effort instead.
+        XCTAssertFalse(body.contains("budget_tokens"))
+        XCTAssertTrue(body.contains("effort"))
+    }
+
+    /// A safety-classifier decline arrives as a *successful* response with an
+    /// empty body. Reading content without checking the stop reason would show
+    /// the user a blank explanation.
+    func testTreatsARefusalAsAFallbackRatherThanAnEmptyAnswer() async {
+        let stub = StubHTTPTransport()
+        stub.stub("api.anthropic.com", json: #"{"content":[],"stop_reason":"refusal"}"#)
+        let analyst = AIAnalyst(vault: vault(["ANTHROPIC_API_KEY": "k"]), transport: stub)
+        let answer = await analyst.answer(sampleRequest)
+        XCTAssertEqual(answer.origin, .onDevice)
+        XCTAssertFalse(answer.value.text.isEmpty)
+    }
+
+    func testTidyStripsMarkdown() {
+        let messy = "**Summary**\n\n- The period rose\n- Stiffness fell\n\n### Next steps"
+        let tidy = AIAnalyst.tidy(messy)
+        XCTAssertFalse(tidy.contains("*"))
+        XCTAssertFalse(tidy.contains("#"))
+        XCTAssertFalse(tidy.contains("- "))
+        XCTAssertTrue(tidy.contains("The period rose"))
+    }
+
+    func testPromptCarriesTheVerdictAsAConstraint() {
+        let prompt = GroundedPrompt.user(sampleRequest)
+        XCTAssertTrue(prompt.contains("CONSTRAINTS"))
+        XCTAssertTrue(prompt.contains("LIMITED USE"))
+        XCTAssertTrue(prompt.contains("Period before: 0.912 s"))
+    }
+
+    func testSpokenGuidanceIsShortAndActionable() {
+        let request = AnalystRequest.guidance(verdict: .red, isShaking: false,
+                                              secondsUntilShaking: nil)
+        let spoken = OnDeviceNarrator.narrate(request)
+        XCTAssertTrue(spoken.lowercased().contains("stay outside"))
+        XCTAssertLessThan(spoken.split(separator: " ").count, 30)
+    }
+}
+
+// MARK: - Fact merging
+
+final class BuildingFactSetTests: XCTestCase {
+
+    private func fact(_ value: String, _ source: FactProvenance.Source,
+                      _ confidence: Double) -> RetrievedFact {
+        RetrievedFact(field: "height", value: value,
+                      provenance: FactProvenance(source: source, confidence: confidence))
+    }
+
+    func testAgreementRaisesConfidence() {
+        var a = BuildingFactSet(facts: ["height": fact("102", .wikidata, 0.85)])
+        a.merge(BuildingFactSet(facts: ["height": fact("103", .openStreetMap, 0.7)]))
+        let merged = try! XCTUnwrap(a["height"])
+        XCTAssertGreaterThan(merged.provenance.confidence, 0.85)
+        XCTAssertTrue(merged.provenance.detail?.contains("Agreed") ?? false)
+    }
+
+    /// Two heights that disagree must not be averaged. The average is a number
+    /// neither source claims, and it would be presented as if it were retrieved.
+    func testDisagreementKeepsAValueRatherThanAveraging() {
+        var a = BuildingFactSet(facts: ["height": fact("102", .wikidata, 0.85)])
+        a.merge(BuildingFactSet(facts: ["height": fact("58", .openStreetMap, 0.7)]))
+        let merged = try! XCTUnwrap(a["height"])
+        XCTAssertEqual(merged.value, "102")
+        XCTAssertLessThan(merged.provenance.confidence, 0.85)
+        XCTAssertTrue(merged.provenance.detail?.contains("Disagrees") ?? false)
+    }
+
+    func testHigherConfidenceSourceWinsADisagreement() {
+        var a = BuildingFactSet(facts: ["height": fact("58", .openStreetMap, 0.7)])
+        a.merge(BuildingFactSet(facts: ["height": fact("102", .wikidata, 0.9)]))
+        XCTAssertEqual(a["height"]?.value, "102")
+    }
+
+    func testNumericAgreementIsWithinTenPercent() {
+        XCTAssertTrue(BuildingFactSet.agree("100", "105"))
+        XCTAssertFalse(BuildingFactSet.agree("100", "130"))
+        XCTAssertTrue(BuildingFactSet.agree("Steel", "steel"))
+    }
+}
+
+// MARK: - Retrieval clients
+
+final class RetrievalTests: XCTestCase {
+
+    /// Wikidata gives longitude first. Reading it in the app's usual order
+    /// would place every imported building on the wrong side of the planet.
+    func testWikidataPointIsLongitudeFirst() throws {
+        let point = try XCTUnwrap(WikidataClient.parsePoint("Point(-0.1246 51.5007)"))
+        XCTAssertEqual(point.latitude, 51.5007, accuracy: 1e-6)
+        XCTAssertEqual(point.longitude, -0.1246, accuracy: 1e-6)
+    }
+
+    func testOverpassFootprintProjectsToMetresAndDropsTheClosingNode() {
+        // A 100 m × 100 m square at the equator, closed the way OSM closes ways.
+        let metrePerDegree = 111_132.0
+        let side = 100.0 / metrePerDegree
+        let points = [
+            OverpassResponse.Point(lat: 0, lon: 0),
+            OverpassResponse.Point(lat: 0, lon: side * 111_132.0 / 111_320.0),
+            OverpassResponse.Point(lat: side, lon: side * 111_132.0 / 111_320.0),
+            OverpassResponse.Point(lat: side, lon: 0),
+            OverpassResponse.Point(lat: 0, lon: 0),
+        ]
+        let ring = OverpassClient.localFootprint(points, originLatitude: 0, originLongitude: 0)
+        XCTAssertEqual(ring.count, 4, "The repeated closing node must be dropped")
+        XCTAssertEqual(OverpassClient.polygonArea(ring), 10_000, accuracy: 200)
+    }
+
+    func testSnippetExtractionFindsStructuralFacts() {
+        let text = "The 42-storey reinforced concrete tower, completed in 1974, "
+                 + "stands 152 metres tall and uses a moment frame."
+        let facts = SnippetExtractor.facts(from: text)
+        XCTAssertEqual(facts["storeyCount"]?.value, "42")
+        XCTAssertEqual(facts["yearBuilt"]?.value, "1974")
+        XCTAssertEqual(facts["material"]?.value, "reinforcedConcrete")
+        XCTAssertEqual(facts["system"]?.value, "momentFrame")
+    }
+
+    /// Everything read out of prose is a guess and is marked as one, so it can
+    /// never silently become a fact inside a safety model.
+    func testSnippetFactsAreNeverTreatedAsConfirmed() {
+        let facts = SnippetExtractor.facts(from: "A 12-storey building.")
+        let provenance = facts["storeyCount"]?.provenance
+        XCTAssertEqual(provenance?.source, .webSearch)
+        XCTAssertFalse(provenance?.isConfirmed ?? true)
+    }
+
+    func testUSGSFeatureBecomesAPlayableRecord() throws {
+        let json = """
+        {"features":[{"properties":{"mag":6.4,"place":"32 km SW of Ridgecrest","time":1562383193040},
+          "geometry":{"coordinates":[-117.6,35.77,8.0]}}]}
+        """
+        let feed = try JSONDecoder().decode(USGSFeed.self, from: Data(json.utf8))
+        let record = try XCTUnwrap(EarthquakeFeedService.record(from: feed.features[0]))
+        XCTAssertEqual(record.magnitude, 6.4, accuracy: 1e-9)
+        XCTAssertEqual(record.latitude, 35.77, accuracy: 1e-9)
+        XCTAssertEqual(record.longitude, -117.6, accuracy: 1e-9)
+        XCTAssertEqual(record.depthKm, 8.0, accuracy: 1e-9)
+        XCTAssertEqual(record.origin, .liveFeed)
+        // Without this the feed would show every live event as having happened
+        // just now, because the library's records only carry a year.
+        XCTAssertEqual(record.originTime?.timeIntervalSince1970 ?? 0,
+                       1562383193.04, accuracy: 0.01)
+        // A live event with no waveform is still runnable in the simulator,
+        // which is the whole point of estimating these two.
+        XCTAssertGreaterThan(record.duration, 5)
+        XCTAssertGreaterThan(record.dominantPeriod, 0.1)
+    }
+}
+
+// MARK: - Building search
+
+final class BuildingSearchServiceTests: XCTestCase {
+
+    private func vault(_ seed: [String: String] = [:]) -> SecretsVault {
+        SecretsVault(storage: InMemorySecretStorage(seed: seed))
+    }
+
+    /// On a plane, with no keys, typing a building name must still land
+    /// somewhere useful rather than on an empty state.
+    func testFallsBackToTheBundledLibraryOffline() async {
+        let service = BuildingSearchService(vault: vault(), transport: StubHTTPTransport())
+        let results = await service.search("Transamerica")
+        XCTAssertEqual(results.origin, .seeded)
+        XCTAssertFalse(results.value.isEmpty)
+        XCTAssertTrue(results.value.contains { $0.name.localizedCaseInsensitiveContains("Transamerica") })
+    }
+
+    func testWikidataResultsAreUsedWhenTheEndpointAnswers() async {
+        let stub = StubHTTPTransport()
+        stub.stub("query.wikidata.org", json: """
+        {"results":{"bindings":[
+          {"itemLabel":{"value":"Chrysler Building"},
+           "height":{"value":"318.9"},
+           "floors":{"value":"77"},
+           "coord":{"value":"Point(-73.9754 40.7516)"}}]}}
+        """)
+        let service = BuildingSearchService(
+            vault: vault(["WIKIDATA_ENDPOINT": "https://query.wikidata.org/sparql"]),
+            transport: stub)
+        let results = await service.search("Chrysler Building")
+        XCTAssertEqual(results.origin, .live)
+        XCTAssertEqual(results.value.first?.name, "Chrysler Building")
+        XCTAssertEqual(results.value.first?.latitude ?? 0, 40.7516, accuracy: 1e-4)
+    }
+
+    func testDeduplicationMergesTheSameBuildingFromTwoProviders() {
+        let candidates = [
+            BuildingCandidate(name: "Chrysler Building", provider: "Wikidata",
+                              confidence: 0.85, snippet: "Art deco."),
+            BuildingCandidate(name: "The Chrysler Building", latitude: 40.75, longitude: -73.97,
+                              provider: "Serper", confidence: 0.6, snippet: "77 storeys."),
+        ]
+        let merged = BuildingSearchService.deduplicate(candidates)
+        XCTAssertEqual(merged.count, 1)
+        XCTAssertEqual(merged[0].latitude ?? 0, 40.75, accuracy: 1e-6,
+                       "The coordinate from the lower-ranked result must be kept")
+        XCTAssertTrue(merged[0].snippet.contains("77 storeys"))
+        XCTAssertTrue(merged[0].provider.contains("Serper"))
+    }
+
+    /// A building with a height but no storey count is still a usable building.
+    /// Composition never produces a zero-storey model.
+    func testComposeDerivesTheMissingDimensionAndSaysSo() {
+        let service = BuildingSearchService(vault: vault(), transport: StubHTTPTransport())
+        let facts = BuildingFactSet(facts: [
+            "height": RetrievedFact(field: "height", value: "68",
+                                    provenance: FactProvenance(source: .wikidata)),
+        ])
+        let building = service.compose(
+            candidate: BuildingCandidate(name: "Nameless Tower", provider: "Wikidata"),
+            facts: facts)
+        XCTAssertEqual(building.storeyCount, 20)
+        XCTAssertEqual(building.height, 68, accuracy: 1e-9)
+        XCTAssertEqual(building.provenance["storeyCount"]?.source, .defaultAssumption)
+        XCTAssertTrue(building.provenance["storeyCount"]?.detail?.contains("3.4") ?? false)
+    }
+
+    func testComposeAlwaysProducesAUsableModel() {
+        let service = BuildingSearchService(vault: vault(), transport: StubHTTPTransport())
+        let building = service.compose(
+            candidate: BuildingCandidate(name: "Nothing Known", provider: "None"),
+            facts: BuildingFactSet())
+        XCTAssertGreaterThanOrEqual(building.storeyCount, 1)
+        XCTAssertGreaterThan(building.height, 0)
+        XCTAssertGreaterThan(building.footprintArea, 0)
+        XCTAssertGreaterThan(building.empiricalPeriod, 0)
+    }
+}
+
+// MARK: - Voice
+
+final class VoiceTests: XCTestCase {
+
+    func testCommandsParseFromNaturalPhrasing() {
+        XCTAssertEqual(VoiceCommand.parse("is it safe"), .isItSafe)
+        XCTAssertEqual(VoiceCommand.parse("uh, is it safe to go inside?"), .isItSafe)
+        XCTAssertEqual(VoiceCommand.parse("Shut off the gas"), .closeGas)
+        XCTAssertEqual(VoiceCommand.parse("read it out"), .readAssessment)
+    }
+
+    /// Doing nothing is a better failure than doing the wrong thing, so an
+    /// unrecognised phrase must return nil rather than the nearest match.
+    func testUnrelatedSpeechIsNotForcedIntoACommand() {
+        XCTAssertNil(VoiceCommand.parse("what time is the train to Manchester"))
+        XCTAssertNil(VoiceCommand.parse(""))
+    }
+
+    /// A misheard word must not be able to close somebody's gas supply.
+    func testPhysicalActionsRequireConfirmation() {
+        XCTAssertTrue(VoiceCommand.closeGas.requiresConfirmation)
+        XCTAssertTrue(VoiceCommand.callHousehold.requiresConfirmation)
+        XCTAssertFalse(VoiceCommand.status.requiresConfirmation)
+    }
+
+    func testSpeechFallsBackToTheSystemVoiceWithoutAKey() async {
+        let service = SpeechService(vault: SecretsVault(storage: InMemorySecretStorage()),
+                                    transport: StubHTTPTransport())
+        let result = await service.speak("Drop, cover and hold on.", urgency: .emergency)
+        XCTAssertEqual(result.origin, .onDevice)
+        guard case .systemVoice(let text, let rate) = result.value else {
+            return XCTFail("Expected the system voice")
+        }
+        XCTAssertEqual(text, "Drop, cover and hold on.")
+        XCTAssertGreaterThan(rate, 0.4)
+    }
+
+    func testSpeechUsesElevenLabsWhenConfigured() async {
+        let stub = StubHTTPTransport()
+        stub.stub("elevenlabs.io", json: "AUDIOBYTES")
+        let vault = SecretsVault(storage: InMemorySecretStorage(seed: ["ELEVENLABS_API_KEY": "k"]))
+        let result = await SpeechService(vault: vault, transport: stub)
+            .speak("Stay outside.", urgency: .emergency)
+        XCTAssertEqual(result.origin, .live)
+        guard case .audio(let data, _) = result.value else { return XCTFail("Expected audio") }
+        XCTAssertFalse(data.isEmpty)
+    }
+}
+
+// MARK: - Households and escalation
+
+final class HouseholdTests: XCTestCase {
+
+    /// The code gets read aloud over a bad phone line, so it must not contain
+    /// characters that sound or look like other characters.
+    func testInviteCodeAvoidsAmbiguousCharacters() {
+        var generator = SeededRandom(seed: 42)
+        for _ in 0..<200 {
+            let code = Household.generateInviteCode(using: &generator)
+            XCTAssertEqual(code.count, 6)
+            for character in code {
+                XCTAssertFalse("AEIOU01258GILOSZ".contains(character),
+                               "\(code) contains an ambiguous character")
+            }
+        }
+    }
+
+    func testRolesGateActuatorControl() {
+        XCTAssertTrue(Household.Role.owner.canControlActuators)
+        XCTAssertTrue(Household.Role.adult.canControlActuators)
+        XCTAssertFalse(Household.Role.child.canControlActuators)
+        XCTAssertFalse(Household.Role.viewer.canControlActuators)
+        XCTAssertFalse(Household.Role.adult.canInvite)
+    }
+
+    func testUnaccountedMembersAreSurfaced() {
+        let household = Household(name: "Home", members: [
+            .init(id: "1", displayName: "A", role: .owner, checkInStatus: .safe),
+            .init(id: "2", displayName: "B", role: .adult, checkInStatus: .unknown),
+            .init(id: "3", displayName: "C", role: .child, checkInStatus: .needsHelp),
+        ])
+        XCTAssertEqual(household.membersUnaccountedFor.count, 1)
+        XCTAssertEqual(household.membersNeedingHelp.first?.displayName, "C")
+    }
+
+    func testEscalationHandsTheMessageBackWhenSMSIsNotConfigured() async {
+        let service = EscalationService(vault: SecretsVault(storage: InMemorySecretStorage()),
+                                        transport: StubHTTPTransport())
+        let message = EscalationService.message(buildingName: "Home", verdict: .red,
+                                                senderName: "Sam")
+        let result = await service.escalate(to: "+15550000000", message: message)
+        guard case .handBackToUser(let text) = result.value else {
+            return XCTFail("Expected the share-sheet fallback")
+        }
+        XCTAssertTrue(text.contains("DO NOT ENTER"))
+        XCTAssertTrue(text.contains("Sam"))
+        XCTAssertEqual(result.origin, .onDevice)
+    }
+}
+
+// MARK: - Key testing
+
+final class KeyTesterTests: XCTestCase {
+
+    func testTestingAnUnsetKeyReportsMissingWithoutCallingAnything() async {
+        let stub = StubHTTPTransport()
+        let vault = SecretsVault(storage: InMemorySecretStorage())
+        let status = await KeyTester(vault: vault, transport: stub).test(.openAIAPIKey)
+        XCTAssertEqual(status, .missing)
+        XCTAssertTrue(stub.requests.isEmpty)
+    }
+
+    func testAWorkingKeyBecomesValid() async {
+        let stub = StubHTTPTransport()
+        stub.stub("api.openai.com", json: #"{"data":[]}"#)
+        let vault = SecretsVault(storage: InMemorySecretStorage(seed: ["OPENAI_API_KEY": "k"]))
+        let status = await KeyTester(vault: vault, transport: stub).test(.openAIAPIKey)
+        guard case .valid = status else { return XCTFail("Expected valid, got \(status)") }
+        XCTAssertEqual(vault.status(for: .openAIAPIKey), status)
+    }
+
+    func testARejectedKeyBecomesFailingWithAReason() async {
+        let stub = StubHTTPTransport()
+        stub.stub("api.openai.com", status: 401, json: #"{"error":"invalid"}"#)
+        let vault = SecretsVault(storage: InMemorySecretStorage(seed: ["OPENAI_API_KEY": "bad"]))
+        let status = await KeyTester(vault: vault, transport: stub).test(.openAIAPIKey)
+        guard case .failing(let reason, _) = status else {
+            return XCTFail("Expected failing, got \(status)")
+        }
+        XCTAssertFalse(reason.isEmpty)
+    }
+
+    /// Claiming a key is valid without having exercised it would be a lie the
+    /// user acts on, so a key with no cheap probe reports "present" instead.
+    func testAKeyWithNoProbeReportsPresentRatherThanValid() async {
+        let vault = SecretsVault(storage: InMemorySecretStorage(seed: ["SENTRY_DSN": "x"]))
+        let status = await KeyTester(vault: vault, transport: StubHTTPTransport()).test(.sentryDSN)
+        XCTAssertEqual(status, .present)
+    }
+}
+
+// MARK: - Cloud
+
+final class CloudServiceTests: XCTestCase {
+
+    func testUnconfiguredCloudIsAnOrdinaryStateNotAnError() async {
+        let service = CloudService(vault: SecretsVault(storage: InMemorySecretStorage()),
+                                   transport: StubHTTPTransport())
+        XCTAssertFalse(service.isConfigured)
+        let tags = await service.nearbyTags(latitude: 37.77, longitude: -122.41, radiusKm: 5)
+        XCTAssertTrue(tags.value.isEmpty)
+        XCTAssertEqual(tags.origin, .onDevice)
+        XCTAssertNotNil(tags.note, "The user must be told why the map is local")
+    }
+
+    func testSignInStoresASessionAndDerivesTheAccount() async throws {
+        let stub = StubHTTPTransport()
+        stub.stub("auth/v1/token", json: """
+        {"access_token":"at","refresh_token":"rt","expires_in":3600,
+         "user":{"id":"u1","email":"sam@example.com","user_metadata":{"full_name":"Sam"}}}
+        """)
+        let vault = SecretsVault(storage: InMemorySecretStorage(seed: [
+            "SUPABASE_URL": "https://project.supabase.co",
+            "SUPABASE_ANON_KEY": "anon",
+        ]))
+        let service = CloudService(vault: vault, transport: stub)
+        let session = try await service.signIn(email: "sam@example.com", password: "pw")
+        XCTAssertEqual(session.account.displayName, "Sam")
+        XCTAssertEqual(session.account.provider, .email)
+        XCTAssertFalse(session.isExpired)
+        let restored = await service.currentSession()
+        XCTAssertEqual(restored?.accessToken, "at")
+    }
+
+    func testGuestAccountIsARealAccount() {
+        let guest = UserAccount.guest()
+        XCTAssertTrue(guest.isGuest)
+        XCTAssertEqual(guest.provider, .guest)
+        XCTAssertFalse(guest.id.isEmpty)
+    }
+}

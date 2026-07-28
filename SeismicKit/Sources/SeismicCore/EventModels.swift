@@ -145,6 +145,12 @@ public struct EarthquakeRecord: Identifiable, Codable, Sendable, Equatable {
     public var dominantPeriod: Double       // s — where its energy sits
     public var summary: String
     public var origin: Origin
+    /// When it actually happened, for records that carry a timestamp.
+    ///
+    /// Historic library entries only know their year, which is all anybody
+    /// quotes for them. Live feed entries know the second, and losing that
+    /// would make every event in the feed read as "just now".
+    public var originTime: Date?
     /// Present for real captures and imported files; synthesised on demand for
     /// library records so the app ships small but shakes with real character.
     public var waveform: Waveform?
@@ -167,13 +173,13 @@ public struct EarthquakeRecord: Identifiable, Codable, Sendable, Equatable {
                 station: String = "", soilAtStation: SoilClass = .denseSoil,
                 pgaTarget: Double, duration: Double, dominantPeriod: Double,
                 summary: String = "", origin: Origin = .historic,
-                waveform: Waveform? = nil) {
+                originTime: Date? = nil, waveform: Waveform? = nil) {
         self.id = id; self.name = name; self.year = year; self.magnitude = magnitude
         self.depthKm = depthKm; self.latitude = latitude; self.longitude = longitude
         self.station = station; self.soilAtStation = soilAtStation
         self.pgaTarget = pgaTarget; self.duration = duration
         self.dominantPeriod = dominantPeriod; self.summary = summary
-        self.origin = origin; self.waveform = waveform
+        self.origin = origin; self.originTime = originTime; self.waveform = waveform
     }
 }
 

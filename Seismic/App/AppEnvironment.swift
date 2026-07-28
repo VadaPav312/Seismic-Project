@@ -7,6 +7,7 @@ import SeismicStructures
 import SeismicGeo
 import SeismicDevice
 import SeismicData
+import SeismicServices
 
 /// The application's object graph.
 ///
@@ -21,6 +22,11 @@ final class AppEnvironment: ObservableObject {
     let secrets: SecretsVault
     let store: SeismicStore
     let session: NodeSession
+
+    /// The networked half of the app. Separate because everything in it
+    /// degrades independently: the app has to work with all of it switched off.
+    let services: ServiceHub
+    let voice: VoiceController
 
     /// How many credentials were found in `.env` at first launch. Surfaced once,
     /// in Settings, and never as a prompt — the app owes the user a working
@@ -82,6 +88,12 @@ final class AppEnvironment: ObservableObject {
         self.secrets = secrets
         self.store = store
         self.session = session
+        // `.env` is read before the hub is built so a key found there is
+        // already in the vault by the time any client asks for it.
+        self.secretsLoadedFromEnv = secrets.bootstrapFromEnvFile(at: Self.bundledEnvFileURL)
+        let hub = ServiceHub(vault: secrets, localLibrary: store.buildingsList())
+        self.services = hub
+        self.voice = VoiceController(speech: hub.speech)
         self.didCompleteOnboarding = UserDefaults.standard.bool(forKey: "didCompleteOnboarding")
     }
 
@@ -114,7 +126,7 @@ final class AppEnvironment: ObservableObject {
         guard !isBootstrapped else { return }
 
         bootstrapStage = "Reading configuration"
-        secretsLoadedFromEnv = secrets.bootstrapFromEnvFile(at: Self.bundledEnvFileURL)
+        services.refreshKeyStatuses()
 
         bootstrapStage = "Loading your library"
         let snapshot = store.load()
@@ -126,6 +138,11 @@ final class AppEnvironment: ObservableObject {
 
         bootstrapStage = "Ready"
         isBootstrapped = true
+
+        // Everything after this point is optional and happens off the launch
+        // path, so a slow network can never delay the first frame.
+        Task { await services.refreshFeed() }
+        Task { await services.speech.prewarmEmergencyLines() }
     }
 
     private func reloadFromStore(_ snapshot: SeismicStore.Snapshot) {
@@ -290,6 +307,17 @@ final class AppEnvironment: ObservableObject {
                                   secondsUntilStrongShaking: seconds,
                                   expectedIntensity: intensity,
                                   isDrill: false)
+
+        // Spoken immediately, and deliberately not routed through the analyst:
+        // this sentence is fixed, pre-rendered and available offline, because
+        // it is the one sentence that must never wait for anything.
+        if let seconds, seconds > 2 {
+            voice.announceEmergency("Earthquake detected. Strong shaking expected in "
+                                    + "\(Int(seconds.rounded())) seconds. "
+                                    + "Drop, cover and hold on.")
+        } else {
+            voice.announceEmergency("Earthquake detected. Drop, cover and hold on.")
+        }
     }
 
     private func updateActiveEvent() {
@@ -387,6 +415,9 @@ final class AppEnvironment: ObservableObject {
             Haptics.shared.play(.assessmentComplete)
             Haptics.shared.play(assessment.verdict == .green ? .verdictGreen
                                 : (assessment.verdict == .red ? .verdictRed : .verdictAmber))
+
+            voice.speak(assessment.verdict.plainMeaning, urgency: .calm)
+            Task { await services.narrative(for: assessment, building: building) }
         }
     }
 
