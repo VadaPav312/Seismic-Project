@@ -24,13 +24,15 @@ struct NetworkScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Metrics.spacingLoose) {
                 if arrivals.isEmpty {
+                    // The empty state already offers both simulations; showing
+                    // the control block underneath it would repeat them.
                     empty
                 } else {
                     map
                     solutionSection
                     stationList
+                    controls
                 }
-                controls
             }
             .padding(Theme.Metrics.screenPadding)
         }

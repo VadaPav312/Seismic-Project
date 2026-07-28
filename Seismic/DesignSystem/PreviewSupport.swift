@@ -1,7 +1,10 @@
 import SwiftUI
 
-#if DEBUG
 /// One object graph for every preview.
+///
+/// Deliberately *not* behind `#if DEBUG`: the bodies of `#Preview` macros are
+/// compiled in release builds too, so a debug-only helper used inside one fails
+/// the release build and nothing else.
 ///
 /// Each screen needs four environment objects and a preview that forgets one
 /// crashes on sight. Injecting them from a single modifier means adding a fifth
@@ -25,4 +28,3 @@ struct PreviewEnvironment: ViewModifier {
 extension View {
     func previewEnvironment() -> some View { modifier(PreviewEnvironment()) }
 }
-#endif
