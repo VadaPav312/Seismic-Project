@@ -285,8 +285,47 @@ struct CerebrasProvider: InferenceProvider {
     }
 }
 
-/// OpenAI. The fallback for text, and the only vision path — photo damage
-/// analysis and photo-to-building modelling both go here.
+/// Gemini. The free-tier provider, and the vision path that needs no card.
+///
+/// It matters more than its position in the chain suggests: photo damage
+/// analysis previously required OpenAI, which has no free tier, so the one
+/// feature in this app that genuinely cannot be done on the device sat behind
+/// a payment method. This removes that.
+struct GeminiProvider: InferenceProvider {
+    let name = "Gemini"
+    let key = SecretKey.geminiAPIKey
+
+    static let model = "gemini-2.0-flash"
+
+    static func endpoint(model: String) -> URL {
+        URL(string: "https://generativelanguage.googleapis.com/v1beta/models/"
+                  + "\(model):generateContent")!
+    }
+
+    func complete(_ request: AnalystRequest, system: String, user: String,
+                  client: ResilientClient, vault: SecretsVault) async throws -> String {
+        guard let apiKey = vault.value(for: key), !apiKey.isEmpty else {
+            throw ServiceError.noCredential(key)
+        }
+
+        let payload = GeminiRequest(
+            contents: [.init(role: "user", parts: [.init(text: user)])],
+            systemInstruction: .init(parts: [.init(text: system)]),
+            generationConfig: .init(temperature: 0.2,
+                                    maxOutputTokens: request.task.wordBudget * 4))
+
+        let http = try HTTPRequest.json(
+            "POST", Self.endpoint(model: Self.model),
+            headers: ["x-goog-api-key": apiKey],
+            body: payload, timeout: request.task.timeout)
+
+        let response: GeminiResponse = try await client.json(http, as: GeminiResponse.self)
+        guard let text = response.firstText, !text.isEmpty else { throw ServiceError.emptyResult }
+        return text
+    }
+}
+
+/// OpenAI. A fallback for text and for vision when its key happens to be set.
 struct OpenAIProvider: InferenceProvider {
     let name = "OpenAI"
     let key = SecretKey.openAIAPIKey
@@ -381,6 +420,57 @@ struct OpenAIChatResponse: Decodable {
         var message: Message
     }
     var choices: [Choice]
+}
+
+struct GeminiRequest: Encodable {
+    struct Part: Encodable {
+        var text: String?
+        var inline_data: InlineData?
+
+        init(text: String? = nil, inline_data: InlineData? = nil) {
+            self.text = text
+            self.inline_data = inline_data
+        }
+    }
+    struct InlineData: Encodable {
+        var mime_type: String
+        var data: String
+    }
+    struct Content: Encodable {
+        var role: String?
+        var parts: [Part]
+    }
+    struct SystemInstruction: Encodable { var parts: [Part] }
+    struct GenerationConfig: Encodable {
+        var temperature: Double
+        var maxOutputTokens: Int
+    }
+
+    var contents: [Content]
+    var systemInstruction: SystemInstruction?
+    var generationConfig: GenerationConfig
+}
+
+struct GeminiResponse: Decodable {
+    struct Candidate: Decodable {
+        struct Content: Decodable {
+            struct Part: Decodable { var text: String? }
+            var parts: [Part]?
+        }
+        var content: Content?
+        var finishReason: String?
+    }
+    var candidates: [Candidate]?
+
+    /// Gemini returns the answer split across parts; joining them is the whole
+    /// of the extraction, and an empty candidate list means it declined.
+    var firstText: String? {
+        let joined = (candidates?.first?.content?.parts ?? [])
+            .compactMap(\.text)
+            .joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return joined.isEmpty ? nil : joined
+    }
 }
 
 struct AnthropicMessagesRequest: Encodable {
@@ -529,7 +619,10 @@ public actor AIAnalyst {
     public init(vault: SecretsVault, transport: HTTPTransport = URLSessionHTTPTransport()) {
         self.vault = vault
         self.client = ResilientClient(transport: transport, requestsPerSecond: 2, burst: 4)
-        self.providers = [CerebrasProvider(), OpenAIProvider(), AnthropicProvider()]
+        // Free-tier providers first, so a user who has added only the keys
+        // that cost nothing still gets the live path rather than the fallback.
+        self.providers = [CerebrasProvider(), GeminiProvider(),
+                          OpenAIProvider(), AnthropicProvider()]
     }
 
     /// The providers that could be tried right now, in order. Surfaced in
@@ -608,12 +701,23 @@ public actor AIAnalyst {
             question: "Describe what is visible. Say whether it looks structural, "
                     + "non-structural, or impossible to tell from this photograph.")
 
+        // Gemini first: it has a free tier, and photo description is the one
+        // thing in this app that genuinely cannot be done on the device, so it
+        // should not be the one thing that requires a payment method.
+        if let geminiKey = vault.value(for: .geminiAPIKey), !geminiKey.isEmpty {
+            if let answer = await describeWithGemini(jpegBase64: jpegBase64, request: request,
+                                                    apiKey: geminiKey) {
+                return answer
+            }
+        }
+
         guard let apiKey = vault.value(for: .openAIAPIKey), !apiKey.isEmpty else {
             return Sourced(AnalystAnswer(text: OnDeviceNarrator.narrate(request),
                                          provider: "On device", isAIGenerated: false),
                            origin: .onDevice, provider: "On device",
-                           note: "Photograph description needs OPENAI_API_KEY. The photograph "
-                               + "is stored either way and can be compared with a later one.")
+                           note: "Photograph description needs a vision key — GEMINI_API_KEY is "
+                               + "free. The photograph is stored either way and can be compared "
+                               + "with a later one.")
         }
 
         struct Content: Encodable {
@@ -667,6 +771,36 @@ public actor AIAnalyst {
             return Sourced(AnalystAnswer(text: OnDeviceNarrator.narrate(request),
                                          provider: "On device", isAIGenerated: false),
                            origin: .onDevice, provider: "On device")
+        }
+    }
+
+    /// The Gemini vision call. Returns nil so the caller can try the next path
+    /// rather than treating one provider's silence as the final answer.
+    private func describeWithGemini(jpegBase64: String, request: AnalystRequest,
+                                    apiKey: String) async -> Sourced<AnalystAnswer>? {
+        let payload = GeminiRequest(
+            contents: [.init(role: "user", parts: [
+                .init(text: GroundedPrompt.user(request)),
+                .init(inline_data: .init(mime_type: "image/jpeg", data: jpegBase64)),
+            ])],
+            systemInstruction: .init(parts: [.init(text: GroundedPrompt.system(for: .photoDamage))]),
+            generationConfig: .init(temperature: 0.2, maxOutputTokens: 600))
+
+        do {
+            let http = try HTTPRequest.json(
+                "POST", GeminiProvider.endpoint(model: GeminiProvider.model),
+                headers: ["x-goog-api-key": apiKey], body: payload, timeout: 40)
+            let response: GeminiResponse = try await client.json(http, as: GeminiResponse.self)
+            guard let text = response.firstText else { return nil }
+            vault.setStatus(.valid(checkedAt: Date()), for: .geminiAPIKey)
+            return Sourced(AnalystAnswer(text: Self.tidy(text), provider: "Gemini",
+                                         isAIGenerated: true),
+                           origin: .live, provider: "Gemini")
+        } catch let error as ServiceError {
+            if let status = error.keyStatus() { vault.setStatus(status, for: .geminiAPIKey) }
+            return nil
+        } catch {
+            return nil
         }
     }
 

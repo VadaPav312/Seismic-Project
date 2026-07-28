@@ -222,6 +222,7 @@ struct APIKeysScreen: View {
     @EnvironmentObject private var env: AppEnvironment
     @State private var editing: SecretKey?
     @State private var draft = ""
+    @AppStorage("apiKeysShowFreeOnly") private var freeOnly = true
 
     var body: some View {
         List {
@@ -234,10 +235,27 @@ struct APIKeysScreen: View {
                     .foregroundStyle(Theme.Palette.textSecondary)
             }
 
+            Section {
+                Toggle(isOn: $freeOnly) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Label("Show only the free ones", systemImage: "gift")
+                        Text("Every capability in this app has a path that costs nothing. "
+                             + "Hiding the paid keys makes it obvious which signups will end "
+                             + "at a card form.")
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+
             ForEach(SecretKey.Group.allCases) { group in
-                Section(group.rawValue) {
-                    ForEach(SecretKey.allCases.filter { $0.group == group }) { key in
-                        keyRow(key)
+                let keys = SecretKey.allCases.filter {
+                    $0.group == group && (!freeOnly || $0.cost == .free || $0.cost == .none)
+                }
+                if !keys.isEmpty {
+                    Section(group.rawValue) {
+                        ForEach(keys) { key in keyRow(key) }
                     }
                 }
             }
@@ -262,6 +280,15 @@ struct APIKeysScreen: View {
                         .foregroundStyle(Theme.Palette.textPrimary)
                     Spacer()
                     statusPill(for: key)
+                }
+
+                // What it costs to get, said before the user spends ten minutes
+                // discovering it for themselves.
+                if key.isSensitive {
+                    StatusPill(text: key.cost.label, systemImage: key.cost.systemImage,
+                               tint: key.cost == .free ? Theme.Palette.verdictGreen
+                                   : (key.cost == .paid ? Theme.Palette.verdictAmber
+                                                        : Theme.Palette.textSecondary))
                 }
                 Text(key.purpose)
                     .font(Theme.Typography.caption)

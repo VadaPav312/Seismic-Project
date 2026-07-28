@@ -275,6 +275,10 @@ public actor KeyTester {
         case .cerebrasAPIKey:
             HTTPRequest(url: URL(string: "https://api.cerebras.ai/v1/models")!,
                         headers: ["Authorization": "Bearer \(value)"], timeout: 12)
+        case .geminiAPIKey:
+            HTTPRequest(url: URL(string: "https://generativelanguage.googleapis.com/"
+                                        + "v1beta/models")!,
+                        headers: ["x-goog-api-key": value], timeout: 12)
         case .anthropicAPIKey:
             HTTPRequest(url: URL(string: "https://api.anthropic.com/v1/models")!,
                         headers: ["x-api-key": value, "anthropic-version": "2023-06-01"],

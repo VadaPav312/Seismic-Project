@@ -647,3 +647,107 @@ final class CloudServiceTests: XCTestCase {
         XCTAssertFalse(guest.id.isEmpty)
     }
 }
+
+// MARK: - The free-tier paths
+
+/// Everything a user with no payment method can reach.
+///
+/// The app's promise is that it works with no keys at all, but the tier above
+/// that matters too: somebody who has signed up only for the providers that
+/// cost nothing should get live answers, not fallbacks. These tests pin that.
+final class FreeTierTests: XCTestCase {
+
+    private func vault(_ seed: [String: String]) -> SecretsVault {
+        SecretsVault(storage: InMemorySecretStorage(seed: seed))
+    }
+
+    private var sampleRequest: AnalystRequest {
+        AnalystRequest(task: .assessmentNarrative, subject: "Test Tower",
+                       facts: [AnalystFact(label: "Period before", value: "0.912 s")],
+                       constraints: ["The verdict is LIMITED USE."],
+                       question: "Explain what changed.")
+    }
+
+    func testGeminiAnswersWhenOnlyItsKeyIsSet() async {
+        let stub = StubHTTPTransport()
+        stub.stub("generativelanguage.googleapis.com", json: """
+        {"candidates":[{"content":{"parts":[{"text":"The period was 0.912 s before the event."}]}}]}
+        """)
+        let analyst = AIAnalyst(vault: vault(["GEMINI_API_KEY": "k"]), transport: stub)
+        let answer = await analyst.answer(sampleRequest)
+
+        XCTAssertEqual(answer.origin, .live)
+        XCTAssertEqual(answer.value.provider, "Gemini")
+        XCTAssertTrue(answer.value.isAIGenerated)
+    }
+
+    /// Gemini's answer arrives split across parts; joining them is the whole of
+    /// the extraction, and getting it wrong would look like an empty reply.
+    func testGeminiRepliesSplitAcrossPartsAreJoined() throws {
+        let json = """
+        {"candidates":[{"content":{"parts":[{"text":"The period "},{"text":"was 0.912 s."}]}}]}
+        """
+        let decoded = try JSONDecoder().decode(GeminiResponse.self, from: Data(json.utf8))
+        XCTAssertEqual(decoded.firstText, "The period was 0.912 s.")
+    }
+
+    func testAnEmptyCandidateListReadsAsNoAnswer() throws {
+        let decoded = try JSONDecoder().decode(GeminiResponse.self,
+                                               from: Data(#"{"candidates":[]}"#.utf8))
+        XCTAssertNil(decoded.firstText)
+    }
+
+    /// Photo description was the one feature that required a paid key. It must
+    /// now work on the free tier.
+    func testPhotoDescriptionWorksWithOnlyAFreeKey() async {
+        let stub = StubHTTPTransport()
+        stub.stub("generativelanguage.googleapis.com", json: """
+        {"candidates":[{"content":{"parts":[{"text":"A hairline crack in plaster, not structural."}]}}]}
+        """)
+        let analyst = AIAnalyst(vault: vault(["GEMINI_API_KEY": "k"]), transport: stub)
+        let answer = await analyst.describePhoto(jpegBase64: "AAAA", subject: "Test Tower",
+                                                 locationLabel: "third floor")
+
+        XCTAssertEqual(answer.origin, .live)
+        XCTAssertEqual(answer.value.provider, "Gemini")
+    }
+
+    /// And when it is absent, the advice names the free option rather than the
+    /// paid one.
+    func testPhotoFallbackPointsAtTheFreeKey() async {
+        let analyst = AIAnalyst(vault: vault([:]), transport: StubHTTPTransport())
+        let answer = await analyst.describePhoto(jpegBase64: "AAAA", subject: "Tower",
+                                                 locationLabel: "")
+        XCTAssertEqual(answer.origin, .onDevice)
+        XCTAssertTrue(answer.note?.contains("GEMINI_API_KEY") ?? false,
+                      "The fallback should point at the key that costs nothing")
+    }
+
+    /// The provider order decides what a free-tier user actually gets.
+    func testFreeProvidersAreTriedBeforePaidOnes() async {
+        let stub = StubHTTPTransport()
+        stub.stub("generativelanguage.googleapis.com", json: """
+        {"candidates":[{"content":{"parts":[{"text":"A grounded sentence."}]}}]}
+        """)
+        stub.stub("api.openai.com", json: """
+        {"choices":[{"message":{"content":"Should not be reached."}}]}
+        """)
+        let analyst = AIAnalyst(vault: vault(["GEMINI_API_KEY": "free",
+                                              "OPENAI_API_KEY": "paid"]), transport: stub)
+        let answer = await analyst.answer(sampleRequest)
+        XCTAssertEqual(answer.value.provider, "Gemini")
+    }
+
+    /// Every capability has a path that costs nothing.
+    func testEveryPaidKeyHasAFreeOrOnDeviceAlternative() {
+        for key in SecretKey.allCases where key.cost == .paid {
+            XCTAssertFalse(key.fallbackBehaviour.isEmpty,
+                           "\(key.rawValue) is paid and must document what happens without it")
+        }
+        // The capabilities that would otherwise need a card.
+        XCTAssertEqual(SecretKey.geminiAPIKey.cost, .free, "Vision must have a free path")
+        XCTAssertEqual(SecretKey.cerebrasAPIKey.cost, .free, "Inference must have a free path")
+        XCTAssertEqual(SecretKey.supabaseURL.cost, .free, "Sync must have a free path")
+        XCTAssertFalse(SecretKey.freeKeys.isEmpty)
+    }
+}
