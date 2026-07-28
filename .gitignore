@@ -1,0 +1,29 @@
+# Secrets — the real .env never gets committed. .env.example does.
+.env
+.env.local
+*.pem
+*.p8
+*.p12
+*.mobileprovision
+
+# Xcode
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+*.xcscmblueprint
+*.xccheckout
+*.moved-aside
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Packages/
+Package.resolved
+
+# macOS
+.DS_Store
