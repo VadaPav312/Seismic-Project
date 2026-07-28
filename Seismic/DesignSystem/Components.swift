@@ -372,6 +372,26 @@ struct DesignedEmptyState: View {
     }
 }
 
+extension View {
+    /// Makes a view take the full height its scroll container can show, so its
+    /// contents sit in the middle of the screen rather than at the top of it.
+    ///
+    /// `maxHeight: .infinity` does not do this inside a `ScrollView`: the scroll
+    /// view offers its content unbounded height, so "infinity" resolves to the
+    /// content's own natural height and the view stays exactly as tall as what
+    /// is inside it. That is why the empty states sat under the navigation bar
+    /// with two-thirds of the screen empty beneath them.
+    ///
+    /// Only for views that are the *entire* contents of a screen. Applied to
+    /// something sharing a scroll view with other sections it would push
+    /// everything else off the bottom.
+    func fillsAvailableHeight(minimum: CGFloat = 360) -> some View {
+        containerRelativeFrame(.vertical, alignment: .center) { height, _ in
+            Swift.max(height, minimum)
+        }
+    }
+}
+
 /// Errors are plain language with a way forward, never a code.
 struct InlineNotice: View {
     enum Level { case info, warning, critical

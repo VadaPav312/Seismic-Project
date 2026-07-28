@@ -483,15 +483,28 @@ struct ActuatorRow: View {
 
                 Spacer(minLength: 0)
 
-                Button("Fire") { send(.fireActuator(kind)) }
-                    .font(Theme.Typography.label)
-                    .padding(.horizontal, 12).padding(.vertical, 7)
-                    .buttonStyle(SecondaryButtonStyle())
+                // The padding belongs to the *label*, not to the button.
+                //
+                // Applied outside `buttonStyle` it lands outside the style's
+                // background instead of inside it, so the filled chip hugged
+                // the word and the padding became invisible dead space around
+                // it. These are the controls that shut off somebody's gas
+                // supply; they get a full 44pt target like everything else.
+                Button { send(.fireActuator(kind)) } label: {
+                    Text("Fire")
+                        .font(Theme.Typography.label)
+                        .padding(.horizontal, 16)
+                        .frame(height: Theme.Metrics.minimumTapTarget)
+                }
+                .buttonStyle(SecondaryButtonStyle())
 
-                Button("Reset") { send(.resetActuator(kind)) }
-                    .font(Theme.Typography.label)
-                    .padding(.horizontal, 12).padding(.vertical, 7)
-                    .buttonStyle(SecondaryButtonStyle())
+                Button { send(.resetActuator(kind)) } label: {
+                    Text("Reset")
+                        .font(Theme.Typography.label)
+                        .padding(.horizontal, 16)
+                        .frame(height: Theme.Metrics.minimumTapTarget)
+                }
+                .buttonStyle(SecondaryButtonStyle())
             }
 
             // How it was confirmed matters more than that it was commanded.

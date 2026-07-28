@@ -412,7 +412,10 @@ public enum Window: String, CaseIterable, Sendable, Identifiable {
 
     public var label: String {
         switch self {
-        case .rectangular: "Rectangular (none)"
+        // Short enough that four of these fit a segmented control on the
+        // narrowest phone. "Rectangular (none)" was truncated to "Rectangul…",
+        // which is worse than useless as a label.
+        case .rectangular: "None"
         case .hann: "Hann"
         case .hamming: "Hamming"
         case .blackman: "Blackman"

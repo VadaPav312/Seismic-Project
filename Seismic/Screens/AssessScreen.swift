@@ -416,7 +416,7 @@ struct AssessScreen: View {
             action: { env.simulateEarthquake() },
             secondaryActionTitle: "Run a drill instead",
             secondaryAction: { env.startDrill(fireActuators: false) })
-            .frame(minHeight: 420)
+            .fillsAvailableHeight()
     }
 }
 

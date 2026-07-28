@@ -50,6 +50,7 @@ struct NetworkScreen: View {
             action: { simulate(count: 5, collinear: false) },
             secondaryActionTitle: "Simulate three nodes in a line",
             secondaryAction: { simulate(count: 3, collinear: true) })
+            .fillsAvailableHeight()
     }
 
     private var map: some View {
