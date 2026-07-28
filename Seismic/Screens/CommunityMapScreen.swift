@@ -3,6 +3,7 @@ import MapKit
 import SeismicCore
 import SeismicGeo
 import SeismicData
+import SeismicServices
 
 /// The community picture.
 ///
@@ -11,6 +12,13 @@ import SeismicData
 /// hours after an event can be watched unfolding.
 struct CommunityMapScreen: View {
     @EnvironmentObject private var env: AppEnvironment
+    @EnvironmentObject private var services: ServiceHub
+
+    /// Tags fetched from the community service, kept separate from the local
+    /// ones so the map can say which is which rather than blending them.
+    @State private var remoteTags: [CommunityTag] = []
+    @State private var remoteNote: String?
+    @State private var isFetching = false
 
     @State private var position: MapCameraPosition = .automatic
     @State private var filters = MapFilters()
@@ -31,7 +39,9 @@ struct CommunityMapScreen: View {
     }
 
     private var visibleTags: [CommunityTag] {
-        env.tags.filter { tag in
+        var seen = Set<UUID>()
+        let combined = (env.tags + remoteTags).filter { seen.insert($0.id).inserted }
+        return combined.filter { tag in
             guard filters.verdicts.contains(tag.verdict) else { return false }
             guard tag.tier >= filters.minimumTier else { return false }
             if filters.sensorVerifiedOnly && tag.tier == .unverified { return false }
@@ -78,6 +88,37 @@ struct CommunityMapScreen: View {
             TagDetailSheet(tag: tag)
         }
         .onAppear { centreOnBuilding() }
+        .task { await fetchCommunityTags() }
+        .refreshable { await fetchCommunityTags() }
+        .overlay(alignment: .bottom) {
+            if let remoteNote {
+                Text(remoteNote)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .padding(10)
+                    .frame(maxWidth: .infinity)
+                    .background(.ultraThinMaterial)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall))
+                    .padding(Theme.Metrics.screenPadding)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Pulls in what other people have published nearby.
+    ///
+    /// With no community service configured this returns nothing and says so,
+    /// which is the honest outcome: an empty map that claims to be live would
+    /// read as "nobody near me has any damage".
+    private func fetchCommunityTags() async {
+        guard let building = env.selectedBuilding else { return }
+        isFetching = true
+        let result = await services.cloud.nearbyTags(latitude: building.latitude,
+                                                     longitude: building.longitude,
+                                                     radiusKm: 10)
+        remoteTags = result.value
+        remoteNote = result.note
+        isFetching = false
     }
 
     private func centreOnBuilding() {

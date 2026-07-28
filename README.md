@@ -25,8 +25,11 @@ Requires Xcode 16 or later and iOS 17+.
 cd SeismicKit && swift test
 ```
 
-489 tests across seven modules. Every one of the fifty algorithms is tested
-against a known input with an expected output.
+535 tests across seven modules. Every one of the fifty algorithms is tested
+against a known input with an expected output, and every network client is
+tested against a stubbed transport — including the paths that fail, which are
+the ones that matter and the ones a live-network test would never reach
+reliably.
 
 ## What is here
 
@@ -41,7 +44,8 @@ SeismicKit/              All logic, as a multi-module Swift package
   SeismicStructures      Algorithms 39–50: the solver and the assessment
   SeismicDevice          BLE protocol, chunked transfer, the simulated node
   SeismicData            Persistence, seed library, tamper-evident ledger, sync
-  SeismicServices        Reserved for the networked service clients
+  SeismicServices        HTTP with backoff, the AI analyst, retrieval, cloud
+SeismicWidgets/          Home-screen widget and the Live Activity
 .env.example             Every environment variable, with its purpose and what
                          happens when it is absent
 ```
@@ -76,6 +80,34 @@ Three services are used that need no key at all, which is worth saying plainly
 because the opposite is usually assumed: the USGS earthquake feed, USGS
 aftershock forecasts, and OpenStreetMap tiles.
 
+## The parts that are easy to miss
+
+**The analyst cannot invent a number.** Any answer it produces is checked
+against the facts it was given; a numeric token that appears nowhere in them
+means the whole answer is discarded and the deterministic on-device narrator is
+used instead, with the substitution stated on screen. A fluent paragraph
+containing a measurement nobody took is the one failure this app cannot ship.
+
+**You can hear a building.** Its period is transposed up six octaves — a pure
+multiplication, so every ratio survives — and played. Play the before and after
+periods together and the change stops being a percentage: two tones nine hertz
+apart beat against each other nine times a second, and you hear the damage as a
+throb. People who cannot read a spectrum trust their own ears immediately.
+
+**The Live Activity is the real interface.** Nobody unlocks a phone and finds an
+app during an earthquake. The countdown, the instruction and eventually the
+verdict appear on the Lock Screen and in the Dynamic Island, and the sequence is
+ended deliberately with the verdict left visible for five minutes afterwards.
+
+**The network screen demonstrates its own failure.** Three sensors in a line
+produce a confident-looking epicentre in the wrong place. There is a button that
+does exactly that, beside the button that does it properly, and the azimuthal
+gap is the number that gives the bad one away.
+
+**Nothing needs a key.** Wikidata, OpenStreetMap and the USGS feed are the
+highest-quality sources in the app and all three are free, so building import
+and the live earthquake feed work on a fresh install with an empty `.env`.
+
 ## Demonstrating it
 
 Node → Demonstration has explicit controls to inject a magnitude 6.4 nearby, a
@@ -83,10 +115,18 @@ distant magnitude 7.4, structural damage, and a connection drop mid-event. These
 are labelled and in the open rather than hidden behind a debug flag, because the
 product is meant to be shown to somebody without hardware.
 
-To open straight onto a given screen — useful for screenshots and demos:
+Presentation mode drives the app itself through a ninety-second argument —
+building, simulation, warning, measurement, map — captioning each beat a moment
+before it happens, so an audience is looking at the right part of the screen when
+it changes. It is in the ⋯ menu.
+
+To open straight onto any screen — useful for screenshots and demos. Every
+section works, not only the five with tabs:
 
 ```
 SEISMIC_INITIAL_TAB=simulator
+SEISMIC_INITIAL_TAB=prepare
+SEISMIC_INITIAL_TAB=network
 ```
 
 ## Notes on a few decisions
@@ -113,3 +153,14 @@ reported interval rather than being averaged away, and a wide interval produces
 **Green, amber and red are reserved for structural verdicts** and appear nowhere
 else in the interface. Every verdict also carries a distinct glyph and border
 weight, so it survives colour blindness, greyscale and a cracked screen.
+
+**A model that says nothing is better than one that guesses.** Two sources that
+disagree about a building's height are never averaged, because the average is a
+number neither of them claims. The higher-confidence value is kept, the conflict
+is recorded in its provenance, and the confidence goes down rather than up.
+
+**Every spoken line has a local twin.** The emergency sentences are pre-rendered
+after each assessment, so the line that would be spoken during the *next* event
+is already cached before it happens — and if it is not, the device's own voice
+says the same words immediately. A voice that needs a network is a voice that
+fails at exactly the moment the network does.

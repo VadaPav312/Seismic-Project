@@ -56,11 +56,18 @@ struct RootView: View {
     @EnvironmentObject private var services: ServiceHub
     @EnvironmentObject private var voice: VoiceController
     @EnvironmentObject private var notifications: NotificationCentre
-    /// Honours `SEISMIC_INITIAL_TAB` so a demo, a screenshot run or a UI test
-    /// can open straight onto a given screen instead of navigating there.
-    @State private var selection: AppSection =
-        ProcessInfo.processInfo.environment["SEISMIC_INITIAL_TAB"]
-            .flatMap(AppSection.init(rawValue:)) ?? .home
+    @StateObject private var director = PresentationDirector()
+    /// The tab bar's selection, which can only ever be one of the five primary
+    /// sections.
+    @State private var selection: AppSection = .home
+
+    /// A section that has no tab of its own, shown over the top of whichever
+    /// tab is selected.
+    ///
+    /// Without this, asking for a secondary section — by voice, by deep link or
+    /// by `SEISMIC_INITIAL_TAB` — would set a tab selection that matches no tab
+    /// and silently leave the user on Home.
+    @State private var presented: AppSection?
 
     var body: some View {
         ZStack {
@@ -82,6 +89,38 @@ struct RootView: View {
                     .transition(.opacity.combined(with: .scale(scale: 1.04)))
                     .zIndex(100)
             }
+
+            // Below the takeover in the stack, deliberately: if a real event
+            // happens during a demonstration, the demonstration gets out of
+            // the way.
+            if director.isRunning {
+                PresentationOverlay(director: director) {
+                    director.stop()
+                    env.isPresentationMode = false
+                }
+                .zIndex(90)
+            }
+        }
+        .fullScreenCover(item: $presented) { section in
+            NavigationStack {
+                destination(for: section)
+                    .seismicBackground()
+                    .navigationTitle(section.title)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Done") { presented = nil }
+                        }
+                    }
+            }
+        }
+        .task {
+            // Honours SEISMIC_INITIAL_TAB so a demo, a screenshot run or a UI
+            // test can open straight onto any screen — including the ones that
+            // have no tab of their own.
+            guard let requested = ProcessInfo.processInfo.environment["SEISMIC_INITIAL_TAB"]
+                .flatMap(AppSection.init(rawValue:)) else { return }
+            show(requested)
         }
         .animation(Theme.Motion.standard, value: env.activeEvent?.id)
         .animation(Theme.Motion.gentle, value: env.isBootstrapped)
@@ -93,6 +132,13 @@ struct RootView: View {
             perform(command)
         }
         .onChange(of: env.latestAssessment?.id) { _, _ in announceAssessment() }
+        .onChange(of: env.isPresentationMode) { _, isOn in
+            if isOn {
+                director.start(environment: env) { section in show(section) }
+            } else {
+                director.stop()
+            }
+        }
         .alert("Confirm out loud commands", isPresented: Binding(
             get: { voice.pendingConfirmation != nil },
             set: { if !$0 { voice.cancelPending() } })) {
@@ -106,13 +152,24 @@ struct RootView: View {
         }
     }
 
+    /// The one way to get anywhere. A primary section changes the tab; a
+    /// secondary one is presented over it.
+    private func show(_ section: AppSection) {
+        if AppSection.primary.contains(section) {
+            presented = nil
+            selection = section
+        } else {
+            presented = section
+        }
+    }
+
     /// Commands that only navigate run immediately. Anything physical has
     /// already been gated behind the confirmation alert above.
     private func perform(_ command: VoiceCommand) {
         _ = voice.consumeCommand()
         switch command {
         case .status, .isItSafe, .readAssessment:
-            selection = .home
+            show(.assess)
             if let assessment = env.latestAssessment {
                 voice.speak(assessment.verdict.placard + ". "
                             + assessment.verdict.plainMeaning, urgency: .calm, force: true)
@@ -124,13 +181,13 @@ struct RootView: View {
             env.startDrill(fireActuators: false)
         case .measureNow:
             env.session.send(.requestPeriodMeasurement)
-            selection = .monitor
+            show(.monitor)
         case .closeGas:
             env.session.send(.fireActuator(.gasValve))
         case .callHousehold:
-            selection = .household
+            show(.household)
         case .showMap:
-            selection = .map
+            show(.map)
         case .stopSpeaking:
             voice.stopSpeaking()
         }
@@ -174,7 +231,9 @@ struct RootView: View {
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 ForEach(AppSection.secondary) { item in
-                    NavigationLink(value: item) {
+                    Button {
+                        show(item)
+                    } label: {
                         Label(item.title, systemImage: item.systemImage)
                     }
                 }

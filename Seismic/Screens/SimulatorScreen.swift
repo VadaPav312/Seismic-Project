@@ -24,6 +24,9 @@ struct SimulatorScreen: View {
     @State private var showsComparison = false
     @State private var showsAR = false
     @StateObject private var sonifier = PeriodSonifier()
+    @StateObject private var recorder = SceneRecorder()
+    @State private var exportedImage: UIImage?
+    @State private var showingImageShare = false
     @State private var showsModeShapes = false
     @State private var selectedMode = 1
     @State private var intensityScale: Double = 1.0
@@ -55,6 +58,11 @@ struct SimulatorScreen: View {
             if let record {
                 ComparisonView(record: record, candidates: env.buildings,
                                initialLeft: selectedBuildingID)
+            }
+        }
+        .sheet(isPresented: $showingImageShare) {
+            if let exportedImage {
+                ActivityShareSheet(items: [exportedImage])
             }
         }
         .sheet(isPresented: $showsAR) {
@@ -196,6 +204,7 @@ struct SimulatorScreen: View {
                         whatIfControls
                         modeControls
                         sonificationControls
+                        captureControls
                     }
                     .padding(.horizontal, Theme.Metrics.screenPadding)
                     .padding(.bottom, Theme.Metrics.spacingLoose)
@@ -460,6 +469,56 @@ struct SimulatorScreen: View {
                     .foregroundStyle(Theme.Palette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    /// Getting it out of the app: a still for a report, a clip for somebody who
+    /// is not in the room.
+    private var captureControls: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+            SectionLabel("Capture", systemImage: "camera.viewfinder")
+
+            HStack(spacing: 8) {
+                Button {
+                    guard let image = recorder.snapshot(controller.renderView) else { return }
+                    exportedImage = image
+                    showingImageShare = true
+                    Haptics.shared.play(.selection)
+                } label: {
+                    Label("Still", systemImage: "camera")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(SecondaryButtonStyle())
+
+                Button {
+                    if recorder.isRecording { recorder.stopRecording() }
+                    else { recorder.startRecording(controller.renderView) }
+                } label: {
+                    Label(recorder.isRecording ? "Stop" : "Record",
+                          systemImage: recorder.isRecording ? "stop.circle.fill" : "record.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(SecondaryButtonStyle())
+            }
+
+            if let url = recorder.lastExportURL, !recorder.isRecording {
+                ShareLink(item: url) {
+                    Label("Share the clip", systemImage: "square.and.arrow.up")
+                        .font(Theme.Typography.caption)
+                }
+            }
+
+            if let status = recorder.status {
+                Text(status)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+            }
+
+            Text("Frames come from the 3D view itself, so the export has no controls or status "
+                 + "bar in it.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

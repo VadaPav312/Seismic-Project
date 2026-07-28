@@ -61,6 +61,10 @@ final class BuildingSceneController: ObservableObject {
     /// reliably works, and it has to happen from the view, which is the only
     /// place the controller is reachable.
     @Published private(set) var framingToken = 0
+
+    /// The view currently rendering this scene, if any. Weak, because the view
+    /// belongs to SwiftUI's lifetime and the controller outlives it.
+    weak var renderView: SCNView?
     /// Vertical exaggeration of the sway. Real drift is a fraction of a per
     /// cent and would be invisible at true scale, so the app amplifies it and
     /// says so on screen rather than silently lying about the magnitude.
@@ -439,6 +443,9 @@ struct BuildingSceneView: UIViewRepresentable {
         doubleTap.numberOfTapsRequired = 2
         view.addGestureRecognizer(doubleTap)
         context.coordinator.view = view
+        // Held weakly so still and clip export can capture the rendered frames
+        // directly, without the surrounding interface in them.
+        controller.renderView = view
 
         return view
     }
