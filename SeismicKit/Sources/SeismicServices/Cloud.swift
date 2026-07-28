@@ -296,17 +296,139 @@ public actor CloudService {
         return try store(response, provider: provider, fallbackName: displayName)
     }
 
-    /// The OAuth URL for providers without a native token flow. The app opens
-    /// this in an authentication session and hands back the redirect.
-    public nonisolated func authorizationURL(provider: AuthProvider,
-                                             redirect: String) -> URL? {
-        guard let raw = vault.value(for: .supabaseURL), var components =
-                URLComponents(string: raw + "/auth/v1/authorize") else { return nil }
+    /// One in-flight OAuth attempt.
+    ///
+    /// The verifier has to outlive the round trip to Google and back, and it
+    /// must never be sent anywhere except the final token exchange — that is
+    /// the whole point of PKCE. It is held by the caller rather than stored on
+    /// the service so that an abandoned sign-in leaves nothing behind.
+    public struct OAuthAttempt: Sendable {
+        public let url: URL
+        public let provider: AuthProvider
+        public let callbackScheme: String
+        fileprivate let verifier: String
+    }
+
+    /// Starts a browser-based sign-in.
+    ///
+    /// PKCE rather than the implicit flow: a public client cannot keep a secret,
+    /// so the exchange is bound to a one-time verifier this app generates and
+    /// never transmits until the end. `completeOAuth` still accepts an implicit
+    /// fragment response, because whether a Supabase project returns a code or
+    /// a token depends on its configuration and getting that wrong should not
+    /// be the difference between signing in and staring at a spinner.
+    public nonisolated func beginOAuth(provider: AuthProvider,
+                                       redirect: String = "seismic://auth") -> OAuthAttempt? {
+        guard let raw = vault.value(for: .supabaseURL),
+              var components = URLComponents(string: raw + "/auth/v1/authorize"),
+              let scheme = URLComponents(string: redirect)?.scheme
+        else { return nil }
+
+        let verifier = PKCE.verifier()
         components.queryItems = [
             URLQueryItem(name: "provider", value: provider.rawValue),
             URLQueryItem(name: "redirect_to", value: redirect),
+            URLQueryItem(name: "code_challenge", value: PKCE.challenge(for: verifier)),
+            URLQueryItem(name: "code_challenge_method", value: "s256"),
         ]
-        return components.url
+        guard let url = components.url else { return nil }
+        return OAuthAttempt(url: url, provider: provider,
+                            callbackScheme: scheme, verifier: verifier)
+    }
+
+    /// Turns the callback URL into a session.
+    ///
+    /// Three shapes arrive here and all three are real: an error the provider
+    /// wants explained, a PKCE authorisation code, and an implicit fragment
+    /// carrying the tokens directly.
+    public func completeOAuth(callback: URL, attempt: OAuthAttempt) async throws -> CloudSession {
+        let query = URLComponents(url: callback, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let fragment = fragmentItems(of: callback)
+
+        func value(_ name: String) -> String? {
+            query.first { $0.name == name }?.value ?? fragment.first { $0.name == name }?.value
+        }
+
+        // Google's own refusals travel in the redirect, not in an HTTP status.
+        // Surfacing the provider's wording beats "sign-in failed".
+        if let description = value("error_description") ?? value("error") {
+            throw ServiceError.upstream(
+                description.replacingOccurrences(of: "+", with: " "))
+        }
+
+        if let code = value("code") {
+            struct Body: Encodable { var auth_code: String; var code_verifier: String }
+            let url = try baseURL()
+                .appendingPathComponent("auth/v1/token")
+                .appending(queryItems: [URLQueryItem(name: "grant_type", value: "pkce")])
+            let request = try HTTPRequest.json(
+                "POST", url, headers: headers(authenticated: false),
+                body: Body(auth_code: code, code_verifier: attempt.verifier))
+            let response: GoTrueSession = try await client.json(request, as: GoTrueSession.self)
+            return try store(response, provider: attempt.provider,
+                             fallbackName: attempt.provider.label)
+        }
+
+        if let accessToken = value("access_token") {
+            let response = GoTrueSession(
+                access_token: accessToken,
+                refresh_token: value("refresh_token"),
+                expires_in: value("expires_in").flatMap(Int.init),
+                user: try? await profile(accessToken: accessToken))
+            return try store(response, provider: attempt.provider,
+                             fallbackName: attempt.provider.label)
+        }
+
+        throw ServiceError.decoding("The sign-in callback carried neither a code nor a token.")
+    }
+
+    /// The implicit flow hands back a token and nothing else, so the display
+    /// name and email have to be asked for separately.
+    private func profile(accessToken: String) async throws -> GoTrueSession.User {
+        let url = try baseURL().appendingPathComponent("auth/v1/user")
+        var requestHeaders = try headers(authenticated: false)
+        requestHeaders["Authorization"] = "Bearer \(accessToken)"
+        return try await client.json(HTTPRequest(url: url, headers: requestHeaders, timeout: 20),
+                                     as: GoTrueSession.User.self)
+    }
+
+    private nonisolated func fragmentItems(of url: URL) -> [URLQueryItem] {
+        guard let fragment = URLComponents(url: url, resolvingAgainstBaseURL: false)?.fragment,
+              !fragment.isEmpty else { return [] }
+        return URLComponents(string: "?" + fragment)?.queryItems ?? []
+    }
+
+    /// Renews the access token when it is close to expiry.
+    ///
+    /// Called before anything that needs authorisation. A safety app that
+    /// silently stops syncing an hour after sign-in is worse than one that
+    /// never signed in, because the status line claims everything is fine.
+    @discardableResult
+    public func refreshIfNeeded() async -> Bool {
+        guard let current = session else { return false }
+        guard current.expiresAt.timeIntervalSinceNow < 120 else { return true }
+        guard !current.refreshToken.isEmpty else { return false }
+        do {
+            struct Body: Encodable { var refresh_token: String }
+            let url = try baseURL()
+                .appendingPathComponent("auth/v1/token")
+                .appending(queryItems: [URLQueryItem(name: "grant_type",
+                                                     value: "refresh_token")])
+            let request = try HTTPRequest.json(
+                "POST", url, headers: headers(authenticated: false),
+                body: Body(refresh_token: current.refreshToken))
+            let response: GoTrueSession = try await client.json(request, as: GoTrueSession.self)
+            _ = try store(response, provider: current.account.provider,
+                          fallbackName: current.account.displayName)
+            // A refresh grant does not always echo the user back. Minting a new
+            // account id here would orphan every row already synced under the
+            // old one, so the identity is carried across explicitly rather than
+            // left to whatever the response happened to contain.
+            if response.user == nil { session?.account = current.account }
+            return true
+        } catch {
+            return false
+        }
     }
 
     private func store(_ response: GoTrueSession, provider: AuthProvider,
@@ -347,6 +469,38 @@ public actor CloudService {
         _ = try await client.send(HTTPRequest(method: "POST", url: url,
                                               headers: requestHeaders, body: payload,
                                               timeout: 25))
+    }
+
+    /// Uploads one file to the storage bucket and returns its object path.
+    ///
+    /// The path is deliberately prefixed with the account id. That is not
+    /// decoration: the row-level security policy on the bucket matches the
+    /// first path component against the caller's user id, so a photograph of
+    /// somebody's home is readable by that household and nobody else. Files
+    /// written outside that prefix are rejected by the server, which is the
+    /// only place a rejection means anything.
+    ///
+    /// `x-upsert` because the queue replays. An offline week that ends with the
+    /// same photo being sent twice should end with one object, not a duplicate
+    /// and an error.
+    @discardableResult
+    public func upload(_ data: Data, name: String,
+                       contentType: String = "image/jpeg") async throws -> String {
+        guard let bucket = vault.value(for: .cloudStorageBucket), !bucket.isEmpty else {
+            throw ServiceError.notConfigured("Storage bucket")
+        }
+        guard let userID = session?.account.id else {
+            throw ServiceError.notConfigured("Storage upload without an account")
+        }
+        let path = "\(userID)/\(name)"
+        let url = try baseURL().appendingPathComponent("storage/v1/object/\(bucket)/\(path)")
+        var requestHeaders = try headers()
+        requestHeaders["Content-Type"] = contentType
+        requestHeaders["x-upsert"] = "true"
+        _ = try await client.send(HTTPRequest(method: "POST", url: url,
+                                              headers: requestHeaders, body: data,
+                                              timeout: 60))
+        return path
     }
 
     public func fetch<T: Decodable>(table: String, query: [URLQueryItem],

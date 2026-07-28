@@ -19,13 +19,19 @@ public enum ServiceError: Error, Equatable, Sendable {
     case decoding(String)
     case cancelled
     case emptyResult
+    /// A refusal the upstream service worded itself, and worded better than a
+    /// status code could. Sign-in providers explain rejections in the redirect
+    /// rather than in an HTTP status, and "Access blocked: this app's request
+    /// is invalid" tells the user what to fix in a way that "400" never will.
+    case upstream(String)
 
     public var isRetryable: Bool {
         switch self {
         case .transport: true
         case .http(let status, _): status >= 500 || status == 408 || status == 429
         case .rateLimited: true
-        case .noCredential, .notConfigured, .decoding, .cancelled, .emptyResult: false
+        case .noCredential, .notConfigured, .decoding, .cancelled, .emptyResult,
+             .upstream: false
         }
     }
 
@@ -41,6 +47,7 @@ public enum ServiceError: Error, Equatable, Sendable {
         case .decoding: "The service answered in a shape this app did not expect."
         case .cancelled: "Cancelled."
         case .emptyResult: "Nothing was found."
+        case .upstream(let message): message
         }
     }
 

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- The rest of this file is generated from the INFOPLIST_KEY_* build
+	     settings. Only keys with no build-setting equivalent belong here, and
+	     CFBundleURLTypes is the reason the file exists at all: without a
+	     registered scheme the OAuth redirect has nowhere to land and sign-in
+	     stops on a blank browser page. -->
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLName</key>
+			<string>app.seismic.ios.auth</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>seismic</string>
+			</array>
+		</dict>
+	</array>
+</dict>
+</plist>

@@ -208,6 +208,40 @@ final class ServiceHub: ObservableObject {
         }
     }
 
+    /// Google and anything else that signs in through a browser.
+    ///
+    /// Returns nil on success, or a sentence to show. Cancelling returns nil
+    /// too: the user closed the sheet on purpose and does not need to be told
+    /// what they just did.
+    func signInWithBrowser(provider: AuthProvider) async -> String? {
+        guard let attempt = cloud.beginOAuth(provider: provider) else {
+            return "Sign-in needs a Supabase project. Add SUPABASE_URL and "
+                 + "SUPABASE_ANON_KEY, then enable Google in Authentication → Providers."
+        }
+        let signIn = WebSignIn()
+        webSignIn = signIn
+        defer { webSignIn = nil }
+
+        do {
+            let callback = try await signIn.authenticate(attempt)
+            let session = try await cloud.completeOAuth(callback: callback, attempt: attempt)
+            let wasGuest = account?.isGuest ?? false
+            account = session.account
+            persistIdentity()
+            if wasGuest { queueGuestDataForUpload() }
+            return nil
+        } catch WebSignIn.Failure.cancelled {
+            return nil
+        } catch let error as ServiceError {
+            return error.userFacingReason
+        } catch {
+            return "Google sign-in did not complete."
+        }
+    }
+
+    /// Kept alive for the duration of the browser sheet.
+    private var webSignIn: WebSignIn?
+
     func signOut() async {
         await cloud.signOut()
         account = nil

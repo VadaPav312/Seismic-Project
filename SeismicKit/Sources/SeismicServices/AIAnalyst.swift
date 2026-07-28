@@ -266,7 +266,7 @@ struct CerebrasProvider: InferenceProvider {
         guard let apiKey = vault.value(for: key), !apiKey.isEmpty else {
             throw ServiceError.noCredential(key)
         }
-        let model = vault.value(for: .cerebrasModel) ?? "llama-3.3-70b"
+        let model = vault.value(for: .cerebrasModel) ?? SecretKey.cerebrasModel.defaultValue!
         let url = URL(string: "https://api.cerebras.ai/v1/chat/completions")!
         let payload = OpenAIChatRequest(
             model: model,
@@ -295,7 +295,15 @@ struct GeminiProvider: InferenceProvider {
     let name = "Gemini"
     let key = SecretKey.geminiAPIKey
 
-    static let model = "gemini-2.0-flash"
+    /// The floating alias, deliberately, rather than a pinned version.
+    ///
+    /// Google retires specific Gemini versions from the free tier on its own
+    /// schedule — `gemini-2.0-flash` now answers with a zero free quota, and
+    /// `gemini-2.5-flash` refuses new users outright. A pinned id means the
+    /// photo path silently dies on a date nobody chose. The alias tracks
+    /// whichever flash model is currently free, which is exactly what a build
+    /// that must keep working without maintenance needs.
+    static let model = "gemini-flash-latest"
 
     static func endpoint(model: String) -> URL {
         URL(string: "https://generativelanguage.googleapis.com/v1beta/models/"

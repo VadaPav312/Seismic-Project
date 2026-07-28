@@ -128,7 +128,10 @@ public enum SecretKey: String, CaseIterable, Codable, Sendable, Identifiable {
         case .overpassEndpoint:
             "Footprints fall back to a parametric plan from the stated floor area."
         case .googleClientID, .googleServerClientID:
-            "Sign-in offers Apple and email; guest mode keeps everything local."
+            // Google sign-in runs through Supabase, which holds the OAuth client
+            // itself — so these being blank does not disable it. They are kept
+            // as the record of which client the project was configured with.
+            "Google sign-in still works if Supabase has the provider enabled."
         case .supabaseURL, .supabaseAnonKey, .cloudStorageBucket:
             "Everything is stored locally and queued; sync resumes if you add a project later."
         case .twilioAccountSID, .twilioAuthToken, .twilioFromNumber:
@@ -152,7 +155,9 @@ public enum SecretKey: String, CaseIterable, Codable, Sendable, Identifiable {
         switch self {
         case .wikidataEndpoint: "https://query.wikidata.org/sparql"
         case .overpassEndpoint: "https://overpass-api.de/api/interpreter"
-        case .cerebrasModel: "llama-3.3-70b"
+        // Cerebras rotates its catalogue; llama-3.3-70b was withdrawn and the
+        // endpoint answers 404 for it. Verified against /v1/models.
+        case .cerebrasModel: "gpt-oss-120b"
         default: nil
         }
     }

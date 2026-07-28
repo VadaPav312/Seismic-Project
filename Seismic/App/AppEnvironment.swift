@@ -26,6 +26,10 @@ final class AppEnvironment: ObservableObject {
     /// The networked half of the app. Separate because everything in it
     /// degrades independently: the app has to work with all of it switched off.
     let services: ServiceHub
+
+    /// Empties the sync queue whenever there is an account, a network and
+    /// something to send.
+    let sync: SyncEngine
     let voice: VoiceController
     /// The Lock Screen and the home-screen widget.
     let live = LiveActivityController()
@@ -125,6 +129,7 @@ final class AppEnvironment: ObservableObject {
         let hub = ServiceHub(vault: secrets, localLibrary: store.buildingsList())
         self.services = hub
         self.voice = VoiceController(speech: hub.speech)
+        self.sync = SyncEngine(store: store, cloud: hub.cloud) { [weak hub] in hub?.account }
         self.didCompleteOnboarding = UserDefaults.standard.bool(forKey: "didCompleteOnboarding")
     }
 

@@ -521,12 +521,14 @@ struct AuthSheet: View {
     }
 
     private func signInWithGoogle() {
-        guard let url = services.cloud.authorizationURL(provider: .google,
-                                                        redirect: "seismic://auth") else {
-            error = "Google sign-in needs a Supabase project with Google enabled."
-            return
+        error = nil
+        isWorking = true
+        Task {
+            let message = await services.signInWithBrowser(provider: .google)
+            isWorking = false
+            error = message
+            if message == nil, services.account?.isGuest == false { dismiss() }
         }
-        UIApplication.shared.open(url)
     }
 }
 

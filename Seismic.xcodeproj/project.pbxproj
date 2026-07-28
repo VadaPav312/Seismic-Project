@@ -53,6 +53,7 @@
 		AA00000000000000000023 /* PBXFileSystemSynchronizedBuildFileExceptionSet */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
+				Info.plist,
 				Seismic.entitlements,
 			);
 			target = AA00000000000000000008 /* Seismic */;
@@ -324,6 +325,7 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Seismic/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Seismic;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Seismic connects to your seismic node over Bluetooth to stream live motion data and confirm safety actions.";
@@ -365,6 +367,7 @@
 				DEVELOPMENT_ASSET_PATHS = "";
 				ENABLE_PREVIEWS = YES;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = Seismic/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Seismic;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
 				INFOPLIST_KEY_NSBluetoothAlwaysUsageDescription = "Seismic connects to your seismic node over Bluetooth to stream live motion data and confirm safety actions.";
