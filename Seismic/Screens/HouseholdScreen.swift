@@ -406,11 +406,22 @@ struct AuthSheet: View {
                         services.continueAsGuest()
                         finish()
                     }
-                    .font(Theme.Typography.caption)
+                    .font(Theme.Typography.callout)
                     .foregroundStyle(Theme.Palette.accent)
                     .frame(maxWidth: .infinity)
+                    .frame(height: Theme.Metrics.minimumTapTarget)
                 }
-                .padding(Theme.Metrics.screenPadding)
+                // The launch gate is a full screen rather than a sheet, and a
+                // form stretched edge to edge across a 6.9-inch phone reads as
+                // unfinished. Wider margins and a measured column give it the
+                // same breathing room every other screen has; the cap stops it
+                // sprawling on an iPad.
+                .frame(maxWidth: isLaunchGate ? 460 : .infinity)
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, isLaunchGate ? Theme.Metrics.spacingSection
+                                                   : Theme.Metrics.screenPadding)
+                .padding(.vertical, isLaunchGate ? Theme.Metrics.spacingSection
+                                                 : Theme.Metrics.screenPadding)
             }
             .seismicBackground()
             .navigationTitle(isLaunchGate ? "" : "Sign in")
@@ -429,22 +440,21 @@ struct AuthSheet: View {
     private var launchHeader: some View {
         VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
             Image(systemName: "waveform.path.ecg")
-                .font(.system(size: 40, weight: .thin))
+                .font(.system(size: 34, weight: .thin))
                 .foregroundStyle(Theme.Palette.accent)
 
             Text("SEISMIC")
-                .font(.system(size: 30, weight: .semibold))
-                .tracking(6)
+                .font(.system(size: 26, weight: .semibold))
+                .tracking(5)
                 .foregroundStyle(Theme.Palette.textPrimary)
 
             Text("Know whether your building is safe to be in — from its own "
                  + "measurements, not from a guess.")
-                .font(Theme.Typography.body)
+                .font(Theme.Typography.callout)
                 .foregroundStyle(Theme.Palette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, Theme.Metrics.spacing)
         .padding(.bottom, Theme.Metrics.spacing)
     }
 
