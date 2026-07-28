@@ -51,6 +51,16 @@ final class NotificationCentre: NSObject, ObservableObject {
     }
 
     @Published private(set) var authorisation: UNAuthorizationStatus = .notDetermined
+
+    /// Whether critical alerts — the ones that sound through a silent switch
+    /// and Do Not Disturb — were actually granted.
+    ///
+    /// They need an entitlement Apple grants case by case. Asking for them
+    /// without it makes the *entire* authorisation request fail, which for a
+    /// safety app means no notifications at all rather than merely quieter
+    /// ones, so the request falls back and the interruption level follows what
+    /// was really granted rather than what was hoped for.
+    @Published private(set) var hasCriticalAlerts = false
     @Published var enabled: [Kind: Bool] = [:]
 
     private let centre = UNUserNotificationCenter.current()
@@ -70,7 +80,9 @@ final class NotificationCentre: NSObject, ObservableObject {
     }
 
     func refreshAuthorisation() async {
-        authorisation = await centre.notificationSettings().authorizationStatus
+        let settings = await centre.notificationSettings()
+        authorisation = settings.authorizationStatus
+        hasCriticalAlerts = settings.criticalAlertSetting == .enabled
     }
 
     /// Asked for at a moment when the reason is obvious — after the first
@@ -78,14 +90,24 @@ final class NotificationCentre: NSObject, ObservableObject {
     /// the user knows what the app does is a permission prompt that gets denied.
     @discardableResult
     func requestAuthorisation() async -> Bool {
+        let ordinary: UNAuthorizationOptions = [.alert, .sound, .badge]
         do {
             let granted = try await centre.requestAuthorization(
-                options: [.alert, .sound, .badge, .criticalAlert])
+                options: ordinary.union(.criticalAlert))
             await refreshAuthorisation()
             return granted
         } catch {
-            await refreshAuthorisation()
-            return false
+            // Almost always the missing critical-alert entitlement. Ask again
+            // for what this build can actually have, rather than leaving the
+            // user with nothing.
+            do {
+                let granted = try await centre.requestAuthorization(options: ordinary)
+                await refreshAuthorisation()
+                return granted
+            } catch {
+                await refreshAuthorisation()
+                return false
+            }
         }
     }
 
@@ -97,10 +119,12 @@ final class NotificationCentre: NSObject, ObservableObject {
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
-        content.interruptionLevel = kind.isCritical ? .critical : .active
-        content.sound = kind.isCritical
-            ? .defaultCriticalSound(withAudioVolume: 1.0)
-            : .default
+        // Only claim to be critical if the system agreed. Setting a critical
+        // level or sound without the entitlement makes the request fail, so an
+        // over-claiming warning is a warning that never arrives.
+        let breaksThrough = kind.isCritical && hasCriticalAlerts
+        content.interruptionLevel = breaksThrough ? .critical : .active
+        content.sound = breaksThrough ? .defaultCriticalSound(withAudioVolume: 1.0) : .default
         content.threadIdentifier = kind.rawValue
 
         let trigger = delay > 0
@@ -176,6 +200,15 @@ struct NotificationSettingsSection: View {
                 .buttonStyle(SecondaryButtonStyle())
             }
 
+            if !centre.hasCriticalAlerts, centre.authorisation == .authorized {
+                Text("This build cannot sound through a silent switch — critical alerts need "
+                     + "an entitlement Apple grants case by case. The earthquake warning still "
+                     + "arrives; it just obeys your ringer like everything else.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             ForEach(NotificationCentre.Kind.allCases) { kind in
                 Toggle(isOn: Binding(
                     get: { centre.enabled[kind] ?? true },
@@ -186,8 +219,12 @@ struct NotificationSettingsSection: View {
                                     .font(Theme.Typography.callout)
                                     .foregroundStyle(Theme.Palette.textPrimary)
                                 if kind.isCritical {
-                                    StatusPill(text: "Breaks through silence",
-                                               tint: Theme.Palette.accent)
+                                    StatusPill(text: centre.hasCriticalAlerts
+                                               ? "Breaks through silence"
+                                               : "Normal alert",
+                                               tint: centre.hasCriticalAlerts
+                                               ? Theme.Palette.accent
+                                               : Theme.Palette.textSecondary)
                                 }
                             }
                             Text(kind.explanation)

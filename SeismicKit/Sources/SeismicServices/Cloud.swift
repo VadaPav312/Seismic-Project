@@ -85,20 +85,29 @@ public struct Household: Identifiable, Codable, Sendable, Equatable {
         public var id: String
         public var displayName: String
         public var role: Role
+        /// Optional, and the feature degrades rather than fails without it: a
+        /// member with no number gets a message prepared for the share sheet
+        /// instead of an SMS. Requiring one would mean nobody could be added
+        /// until their number was to hand.
+        public var phoneNumber: String?
         public var joinedAt: Date
         public var lastCheckIn: Date?
         public var checkInStatus: CheckInStatus
 
         public init(id: String, displayName: String, role: Role,
+                    phoneNumber: String? = nil,
                     joinedAt: Date = Date(), lastCheckIn: Date? = nil,
                     checkInStatus: CheckInStatus = .unknown) {
             self.id = id
             self.displayName = displayName
             self.role = role
+            self.phoneNumber = phoneNumber?.isEmpty == true ? nil : phoneNumber
             self.joinedAt = joinedAt
             self.lastCheckIn = lastCheckIn
             self.checkInStatus = checkInStatus
         }
+
+        public var isReachableBySMS: Bool { phoneNumber != nil }
     }
 
     public enum Role: String, Codable, Sendable, CaseIterable, Identifiable {
@@ -421,6 +430,14 @@ public actor EscalationService {
     }
 
     public func escalate(to phoneNumber: String, message: String) async -> Sourced<Delivery> {
+        // No number, nothing to send to. Falling through would post to Twilio
+        // with an empty recipient and report a service failure for what is
+        // really a missing field.
+        guard !phoneNumber.trimmingCharacters(in: .whitespaces).isEmpty else {
+            return Sourced(.handBackToUser(message), origin: .onDevice, provider: "Share sheet",
+                           note: "No phone number is recorded for them, so the message is ready "
+                               + "for you to send however you normally would.")
+        }
         guard let sid = vault.value(for: .twilioAccountSID), !sid.isEmpty,
               let token = vault.value(for: .twilioAuthToken), !token.isEmpty,
               let from = vault.value(for: .twilioFromNumber), !from.isEmpty else {

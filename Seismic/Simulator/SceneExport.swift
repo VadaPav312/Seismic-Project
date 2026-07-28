@@ -4,6 +4,17 @@ import AVFoundation
 import UIKit
 import Photos
 
+/// Carries a non-Sendable value across an isolation boundary where the
+/// surrounding code guarantees single-threaded access.
+///
+/// Used for exactly one thing here — handing an `AVAssetWriter` into its own
+/// completion handler — and deliberately named so that it reads as a claim
+/// being made rather than a warning being silenced.
+struct UncheckedBox<Value>: @unchecked Sendable {
+    let value: Value
+    init(_ value: Value) { self.value = value }
+}
+
 /// Getting the simulation out of the app.
 ///
 /// A still is for a report; a clip is for showing somebody who is not in the
@@ -166,11 +177,19 @@ final class SceneRecorder: ObservableObject {
         input.markAsFinished()
         status = "Finishing the clip…"
 
-        writer.finishWriting { [weak self] in
-            Task { @MainActor in
+        // `AVAssetWriter` is not Sendable and `finishWriting`'s handler is
+        // `@Sendable`, so the writer travels in an explicit box: it is touched
+        // only inside its own completion callback, which AVFoundation
+        // serialises, and only two plain values cross back to the main actor.
+        let url = writer.outputURL
+        let box = UncheckedBox(writer)
+
+        writer.finishWriting {
+            let succeeded = box.value.status == .completed
+            Task { @MainActor [weak self] in
                 guard let self else { return }
-                if writer.status == .completed {
-                    self.lastExportURL = writer.outputURL
+                if succeeded {
+                    self.lastExportURL = url
                     self.status = "Clip ready — \(self.frameCount) frames."
                     Haptics.shared.play(.assessmentComplete)
                 } else {

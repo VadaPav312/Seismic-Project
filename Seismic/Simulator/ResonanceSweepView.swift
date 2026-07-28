@@ -260,11 +260,15 @@ struct ResonanceSweepView: View {
         isSweeping = true
         progress = 0
         let model = ShearBuilding.from(building)
+        // Read on the main actor and passed in, rather than captured: reaching
+        // for main-actor state from inside a detached task is a data race, and
+        // one the Swift 6 language mode rejects outright.
+        let driveAmplitude = amplitude
 
         // Off the main thread: 60 full time-history solves is a second or two
         // of work and would drop every frame if it ran here.
         let computed: [ResonanceSweep.Point] = await Task.detached(priority: .userInitiated) {
-            ResonanceSweep.sweep(model, amplitude: amplitude)
+            ResonanceSweep.sweep(model, amplitude: driveAmplitude)
         }.value
 
         points = computed

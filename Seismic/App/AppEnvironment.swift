@@ -79,10 +79,39 @@ final class AppEnvironment: ObservableObject {
         var isDrill: Bool
         var userAcknowledged = false
         var actuators: [ActuatorKind: ActuatorReport] = [:]
+
+        /// Seconds still to go, now.
+        ///
+        /// `secondsUntilStrongShaking` is the estimate made when the P wave
+        /// arrived and never changes; this is what is left of it. The takeover
+        /// screen derives the same thing from `startedAt`, and the Lock Screen
+        /// needs it too — handing it the original total is how a Live Activity
+        /// ends up showing a countdown frozen at nine seconds for the whole
+        /// event.
+        var secondsRemaining: Double? {
+            guard let total = secondsUntilStrongShaking else { return nil }
+            return max(total - Date().timeIntervalSince(startedAt), 0)
+        }
+
+        var hasShakingArrived: Bool {
+            guard let remaining = secondsRemaining else { return true }
+            return remaining <= 0
+        }
     }
+
+    /// When the Lock Screen was last told anything.
+    ///
+    /// The tick runs at 20 Hz; a Live Activity updated 20 times a second is
+    /// throttled by the system and burns battery for nothing. Once a second is
+    /// as fast as a countdown in whole seconds can usefully change.
+    private var lastLiveActivityUpdate = Date.distantPast
 
     private var timer: AnyCancellable?
     private var simulatedNode: SimulatedNode?
+
+    /// The display tick. Named because the countdown haptic compares against
+    /// the previous tick and needs to know how long ago that was.
+    private let tickInterval = 1.0 / 20.0
 
     // MARK: Construction
 
@@ -291,11 +320,11 @@ final class AppEnvironment: ObservableObject {
     /// step with the animation rather than on an unrelated timer.
     private func startTicking() {
         stopTicking()
-        timer = Timer.publish(every: 1.0 / 20.0, on: .main, in: .common)
+        timer = Timer.publish(every: tickInterval, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in
                 guard let self else { return }
-                simulatedNode?.tick(deltaTime: 1.0 / 20.0)
+                simulatedNode?.tick(deltaTime: tickInterval)
                 nodeSnapshot = session.snapshot()
                 updateActiveEvent()
             }
@@ -352,27 +381,36 @@ final class AppEnvironment: ObservableObject {
     }
 
     private func updateActiveEvent() {
-        guard var event = activeEvent else { return }
-        if let seconds = event.secondsUntilStrongShaking {
-            let elapsed = Date().timeIntervalSince(event.startedAt)
-            let remaining = max(seconds - elapsed, 0)
-            if Int(remaining) != Int(max(seconds - elapsed + 0.05, 0)) {
+        guard let event = activeEvent else { return }
+
+        // One haptic per whole second of the countdown, escalating as it runs
+        // out. The comparison is against the previous tick's whole second, so
+        // it fires exactly once per boundary rather than on every tick.
+        if let remaining = event.secondsRemaining {
+            let previous = remaining + tickInterval
+            if Int(remaining) != Int(previous) {
                 Haptics.shared.play(.countdownTick(secondsRemaining: Int(remaining)))
             }
-            event.secondsUntilStrongShaking = seconds
         }
+
         // The takeover clears itself once the shaking is over and the user has
         // acknowledged, so nobody is left staring at a stale warning.
         if event.userAcknowledged,
            Date().timeIntervalSince(event.startedAt) > 45 {
             activeEvent = nil
+            live.end()
             return
         }
+
+        // Re-published so any view reading `secondsRemaining` re-evaluates.
         activeEvent = event
 
+        guard Date().timeIntervalSince(lastLiveActivityUpdate) >= 1 else { return }
+        lastLiveActivityUpdate = Date()
+
         let confirmed = event.actuators.values.filter { $0.state == .confirmed }.count
-        live.update(stage: (event.secondsUntilStrongShaking ?? 0) > 1 ? .warning : .shaking,
-                    secondsUntilShaking: event.secondsUntilStrongShaking,
+        live.update(stage: event.hasShakingArrived ? .shaking : .warning,
+                    secondsUntilShaking: event.secondsRemaining,
                     magnitude: event.estimatedMagnitude,
                     intensity: event.expectedIntensity,
                     verdict: nil,

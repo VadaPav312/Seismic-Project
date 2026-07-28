@@ -17,6 +17,8 @@ struct HouseholdScreen: View {
     @State private var showingAuth = false
     @State private var newMemberName = ""
     @State private var newMemberRole: Household.Role = .adult
+    @State private var newMemberPhone = ""
+    @State private var shareableMessage: String?
     @State private var showingInvite = false
     @State private var escalationResult: String?
 
@@ -36,6 +38,12 @@ struct HouseholdScreen: View {
             .padding(Theme.Metrics.screenPadding)
         }
         .sheet(isPresented: $showingAuth) { AuthSheet() }
+        .sheet(isPresented: Binding(get: { shareableMessage != nil },
+                                    set: { if !$0 { shareableMessage = nil } })) {
+            if let shareableMessage {
+                ActivityShareSheet(items: [shareableMessage])
+            }
+        }
         .sheet(isPresented: $showingInvite) {
             if let household = services.household { InviteSheet(household: household) }
         }
@@ -182,7 +190,8 @@ struct HouseholdScreen: View {
                             .foregroundStyle(Theme.Palette.textPrimary)
                         Text(member.role.label
                              + (member.role.canControlActuators
-                                ? " · can fire actuators" : " · view only"))
+                                ? " · can fire actuators" : " · view only")
+                             + (member.isReachableBySMS ? "" : " · no number"))
                             .font(Theme.Typography.caption)
                             .foregroundStyle(Theme.Palette.textTertiary)
                     }
@@ -211,31 +220,46 @@ struct HouseholdScreen: View {
 
             Divider().overlay(Theme.Palette.hairline)
 
-            HStack(spacing: 8) {
-                TextField("Name", text: $newMemberName)
-                    .textFieldStyle(.plain)
-                    .font(Theme.Typography.callout)
-                    .padding(10)
-                    .background(RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall)
-                        .fill(Theme.Palette.surfaceRaised))
+            VStack(spacing: 8) {
+                HStack(spacing: 8) {
+                    TextField("Name", text: $newMemberName)
+                        .textFieldStyle(.plain)
+                        .font(Theme.Typography.callout)
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall)
+                            .fill(Theme.Palette.surfaceRaised))
 
-                Picker("Role", selection: $newMemberRole) {
-                    ForEach(Household.Role.allCases) { Text($0.label).tag($0) }
+                    Picker("Role", selection: $newMemberRole) {
+                        ForEach(Household.Role.allCases) { Text($0.label).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    .tint(Theme.Palette.accent)
                 }
-                .pickerStyle(.menu)
-                .tint(Theme.Palette.accent)
 
-                Button {
-                    guard !newMemberName.isEmpty else { return }
-                    services.addMember(named: newMemberName, role: newMemberRole)
-                    newMemberName = ""
-                    Haptics.shared.play(.selection)
-                } label: {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.system(size: 22))
+                HStack(spacing: 8) {
+                    TextField("Phone number (optional)", text: $newMemberPhone)
+                        .textFieldStyle(.plain)
+                        .keyboardType(.phonePad)
+                        .font(Theme.Typography.callout)
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall)
+                            .fill(Theme.Palette.surfaceRaised))
+
+                    Button {
+                        guard !newMemberName.isEmpty else { return }
+                        services.addMember(named: newMemberName, role: newMemberRole,
+                                           phoneNumber: newMemberPhone.isEmpty ? nil
+                                                                               : newMemberPhone)
+                        newMemberName = ""
+                        newMemberPhone = ""
+                        Haptics.shared.play(.selection)
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .font(.system(size: 22))
+                    }
+                    .disabled(newMemberName.isEmpty)
+                    .foregroundStyle(Theme.Palette.accent)
                 }
-                .disabled(newMemberName.isEmpty)
-                .foregroundStyle(Theme.Palette.accent)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -284,6 +308,10 @@ struct HouseholdScreen: View {
         }
     }
 
+    /// One message per member, sent where there is a number and handed to the
+    /// share sheet where there is not. Reporting both outcomes together is the
+    /// point: "sent to two, three need you to message them" is actionable in a
+    /// way that a single success or failure is not.
     private func escalate(to members: [Household.Member]) {
         let message = EscalationService.message(
             buildingName: env.selectedBuilding?.name ?? "your building",
@@ -291,14 +319,27 @@ struct HouseholdScreen: View {
             senderName: services.account?.displayName ?? "Someone")
 
         Task {
-            let result = await services.escalation.escalate(to: "", message: message)
-            switch result.value {
-            case .sent(let number):
-                escalationResult = "Sent to \(number)."
-            case .handBackToUser(let text):
-                escalationResult = result.note ?? "Ready to send."
-                UIPasteboard.general.string = text
+            var sent: [String] = []
+            var unreachable: [String] = []
+
+            for member in members {
+                let result = await services.escalation.escalate(
+                    to: member.phoneNumber ?? "", message: message)
+                switch result.value {
+                case .sent: sent.append(member.displayName)
+                case .handBackToUser: unreachable.append(member.displayName)
+                }
             }
+
+            var parts: [String] = []
+            if !sent.isEmpty { parts.append("Sent to \(sent.joined(separator: ", ")).") }
+            if !unreachable.isEmpty {
+                parts.append("\(unreachable.joined(separator: ", ")) "
+                             + (unreachable.count == 1 ? "has" : "have")
+                             + " no number on file — the message is ready to send yourself.")
+                shareableMessage = message
+            }
+            escalationResult = parts.joined(separator: " ")
         }
     }
 }

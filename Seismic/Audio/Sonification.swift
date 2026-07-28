@@ -58,14 +58,15 @@ final class PeriodSonifier: ObservableObject {
 
     private let engine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode?
-    private var phases: [Double] = [0, 0, 0]
-    private var frequencies: [Double] = []
-    private var amplitudes: [Double] = []
+    private let renderer = ToneRenderer()
     private let sampleRate: Double = 44_100
-    /// Ramped rather than switched, because a hard start on a sine wave is a
-    /// click, and a click is the one sound guaranteed to make somebody stop.
-    private var envelope: Double = 0
-    private var targetEnvelope: Double = 0
+
+    /// Bumped on every start and stop.
+    ///
+    /// `stop` tears the engine down after letting the envelope fall, and
+    /// without this a tap of stop-then-play within that window would have the
+    /// old teardown arrive late and silence the new tone.
+    private var generation = 0
 
     // MARK: Public control
 
@@ -108,11 +109,15 @@ final class PeriodSonifier: ObservableObject {
     }
 
     func stop() {
-        targetEnvelope = 0
+        renderer.setGateOpen(false)
+        generation += 1
+        let pending = generation
+
         // Let the envelope fall before tearing the engine down, so the tone
         // fades rather than cutting.
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 120_000_000)
+            guard self.generation == pending else { return }
             self.teardown()
         }
     }
@@ -124,12 +129,9 @@ final class PeriodSonifier: ObservableObject {
     // MARK: Engine
 
     private func start(frequencies: [Double], amplitudes: [Double]) {
+        generation += 1
         teardown()
-        self.frequencies = frequencies
-        self.amplitudes = amplitudes
-        self.phases = Array(repeating: 0, count: frequencies.count)
-        self.envelope = 0
-        self.targetEnvelope = 1
+        renderer.setGateOpen(true)
 
         #if os(iOS)
         // Ambient: this is decorative sound and must never interrupt somebody's
@@ -139,29 +141,18 @@ final class PeriodSonifier: ObservableObject {
         #endif
 
         let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 2)!
-        let increment = frequencies.map { 2 * Double.pi * $0 / sampleRate }
+        renderer.configure(frequencies: frequencies, amplitudes: amplitudes,
+                           sampleRate: sampleRate)
 
-        let node = AVAudioSourceNode { [weak self] _, _, frameCount, audioBufferList in
-            guard let self else { return noErr }
+        // The render block runs on a real-time audio thread. It touches the
+        // renderer and nothing else: reaching into this main-actor object from
+        // there — as this once did, to advance `phases` and `envelope` — is a
+        // data race on every field it touches, and the kind that corrupts
+        // quietly rather than crashing where you can see it.
+        let renderer = self.renderer
+        let node = AVAudioSourceNode { _, _, frameCount, audioBufferList in
             let buffers = UnsafeMutableAudioBufferListPointer(audioBufferList)
-            for frame in 0..<Int(frameCount) {
-                // 30 ms attack and release. Slow enough to be inaudible as a
-                // transient, fast enough to feel immediate.
-                self.envelope += (self.targetEnvelope - self.envelope) * 0.0008
-                var sample = 0.0
-                for voice in self.phases.indices {
-                    sample += sin(self.phases[voice]) * self.amplitudes[voice]
-                    self.phases[voice] += increment[voice]
-                    if self.phases[voice] > 2 * Double.pi {
-                        self.phases[voice] -= 2 * Double.pi
-                    }
-                }
-                let value = Float(sample * self.envelope)
-                for buffer in buffers {
-                    let pointer = UnsafeMutableBufferPointer<Float>(buffer)
-                    if frame < pointer.count { pointer[frame] = value }
-                }
-            }
+            renderer.render(frameCount: Int(frameCount), into: buffers)
             return noErr
         }
 
@@ -181,6 +172,7 @@ final class PeriodSonifier: ObservableObject {
     }
 
     private func teardown() {
+        renderer.setGateOpen(false)
         if engine.isRunning { engine.stop() }
         if let sourceNode {
             engine.detach(sourceNode)
@@ -194,5 +186,68 @@ final class PeriodSonifier: ObservableObject {
         // Cannot touch main-actor state here; stopping the engine is enough and
         // is safe from any thread.
         engine.stop()
+    }
+}
+
+/// The part that runs on the audio thread.
+///
+/// Deliberately separate from `PeriodSonifier`, which is main-actor isolated:
+/// everything here is touched from a real-time thread, and the only value
+/// crossing between them is a single gate flag behind an uncontended lock.
+/// Locking in a render callback is normally to be avoided, but an uncontended
+/// `os_unfair_lock` costs tens of nanoseconds against a 23-microsecond buffer,
+/// and the alternative is a race on eight fields at once.
+final class ToneRenderer: @unchecked Sendable {
+    private var frequencies: [Double] = []
+    private var amplitudes: [Double] = []
+    private var phaseIncrements: [Double] = []
+    private var phases: [Double] = []
+
+    private var envelope: Double = 0
+    private var gateOpen = false
+    private let gateLock = NSLock()
+
+    /// Called before the engine starts, so no lock is needed for these.
+    func configure(frequencies: [Double], amplitudes: [Double], sampleRate: Double) {
+        self.frequencies = frequencies
+        self.amplitudes = amplitudes
+        self.phases = Array(repeating: 0, count: frequencies.count)
+        self.phaseIncrements = frequencies.map { 2 * Double.pi * $0 / sampleRate }
+        self.envelope = 0
+    }
+
+    func setGateOpen(_ open: Bool) {
+        gateLock.lock()
+        gateOpen = open
+        gateLock.unlock()
+    }
+
+    private var isGateOpen: Bool {
+        gateLock.lock(); defer { gateLock.unlock() }
+        return gateOpen
+    }
+
+    func render(frameCount: Int, into buffers: UnsafeMutableAudioBufferListPointer) {
+        let target: Double = isGateOpen ? 1 : 0
+
+        for frame in 0..<frameCount {
+            // Roughly a 30 ms attack and release. Slow enough to be inaudible
+            // as a transient, fast enough to feel immediate — and a ramp rather
+            // than a switch, because a hard start on a sine wave is a click.
+            envelope += (target - envelope) * 0.0008
+
+            var sample = 0.0
+            for voice in phases.indices {
+                sample += sin(phases[voice]) * amplitudes[voice]
+                phases[voice] += phaseIncrements[voice]
+                if phases[voice] > 2 * Double.pi { phases[voice] -= 2 * Double.pi }
+            }
+
+            let value = Float(sample * envelope)
+            for buffer in buffers {
+                let pointer = UnsafeMutableBufferPointer<Float>(buffer)
+                if frame < pointer.count { pointer[frame] = value }
+            }
+        }
     }
 }

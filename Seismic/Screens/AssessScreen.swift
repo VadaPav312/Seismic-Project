@@ -517,7 +517,20 @@ struct ReportPreviewSheet: View {
         let controller = UIPrintInteractionController.shared
         controller.printInfo = info
         controller.printingItem = data
-        controller.present(animated: true)
+
+        // On iPad the print controller must be given something to anchor its
+        // popover to; `present(animated:)` raises an exception there rather
+        // than failing gracefully, and this target supports iPad.
+        let scene = UIApplication.shared.connectedScenes
+            .compactMap { $0 as? UIWindowScene }
+            .first { $0.activationState == .foregroundActive }
+        if let view = scene?.keyWindow?.rootViewController?.view,
+           UIDevice.current.userInterfaceIdiom == .pad {
+            let anchor = CGRect(x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
+            controller.present(from: anchor, in: view, animated: true)
+        } else {
+            controller.present(animated: true)
+        }
     }
 }
 

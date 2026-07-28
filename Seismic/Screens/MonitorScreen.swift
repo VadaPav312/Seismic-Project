@@ -50,9 +50,8 @@ struct MonitorScreen: View {
                         message: "The node streams continuously once connected. If nothing "
                             + "appears within a few seconds, check the connection on the node "
                             + "screen — or use the simulated node, which needs no hardware.",
-                        actionTitle: "Use the simulated node") {
-                            env.attachSimulatedNode()
-                        }
+                        actionTitle: "Use the simulated node",
+                        action: { env.attachSimulatedNode() })
                         .frame(minHeight: 380)
                 } else {
                     traces

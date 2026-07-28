@@ -64,7 +64,13 @@ struct SimulatorScreen: View {
             }
         }
         .onAppear { setUp() }
-        .onDisappear { sonifier.stop() }
+        .onDisappear {
+            sonifier.stop()
+            // A display link holds its target strongly, so a recording left
+            // running when the screen goes away keeps capturing frames — and
+            // keeps the recorder alive — for as long as the app runs.
+            recorder.stopRecording()
+        }
         .onChange(of: selectedBuildingID) { _, _ in rebuild() }
         .sheet(isPresented: $showsSweep) {
             if let building { ResonanceSweepView(building: building) }

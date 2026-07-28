@@ -233,9 +233,10 @@ final class ServiceHub: ObservableObject {
         persistIdentity()
     }
 
-    func addMember(named name: String, role: Household.Role) {
+    func addMember(named name: String, role: Household.Role, phoneNumber: String? = nil) {
         guard var current = household else { return }
-        current.members.append(.init(id: UUID().uuidString, displayName: name, role: role))
+        current.members.append(.init(id: UUID().uuidString, displayName: name, role: role,
+                                     phoneNumber: phoneNumber))
         household = current
         persistIdentity()
     }

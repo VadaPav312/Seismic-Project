@@ -12,6 +12,7 @@ import SeismicData
 struct HomeScreen: View {
     @EnvironmentObject private var env: AppEnvironment
     @State private var showingCheckIn = false
+    @State private var showingImport = false
 
     var body: some View {
         ScrollView {
@@ -22,7 +23,8 @@ struct HomeScreen: View {
                         title: "No buildings yet",
                         message: "Add the building you are in, or search for any building in the "
                             + "world and pull it into the simulator.",
-                        actionTitle: "Add a building") {}
+                        actionTitle: "Add a building",
+                        action: { showingImport = true })
                         .frame(minHeight: 420)
                 } else {
                     buildingStatus
@@ -35,6 +37,7 @@ struct HomeScreen: View {
             .padding(Theme.Metrics.screenPadding)
         }
         .refreshable { env.refresh() }
+        .sheet(isPresented: $showingImport) { BuildingImportSheet() }
         .sheet(isPresented: $showingCheckIn) { CheckInSheet() }
     }
 
@@ -363,7 +366,7 @@ struct CheckInSheet: View {
                         message: "Your household sees that you are safe. Anyone who has not "
                             + "checked in within ten minutes will be sent a text message "
                             + "automatically.",
-                        actionTitle: "Done") { dismiss() }
+                        actionTitle: "Done", action: { dismiss() })
                 } else {
                     VStack(spacing: Theme.Metrics.spacing) {
                         Text("Let your household know you are unhurt.")

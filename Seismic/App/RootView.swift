@@ -215,11 +215,6 @@ struct RootView: View {
                         .navigationTitle(section.title)
                         .navigationBarTitleDisplayMode(section == .simulator ? .inline : .large)
                         .toolbar { toolbarContent(for: section) }
-                        .navigationDestination(for: AppSection.self) { pushed in
-                            destination(for: pushed)
-                                .seismicBackground()
-                                .navigationTitle(pushed.title)
-                        }
                 }
                 .tabItem { Label(section.title, systemImage: section.systemImage) }
                 .tag(section)
