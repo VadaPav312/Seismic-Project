@@ -306,13 +306,16 @@ struct TutorialOverlay: View {
         }
         .padding(Theme.Metrics.spacingLoose)
         .frame(width: cardWidth, alignment: .leading)
+        // Opaque, unlike the app's other panels. This card sits over a dimmed
+        // screen and has to be the only legible thing on it; a translucent one
+        // lets the interface it is explaining read straight through the text.
         .background(
-            RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadius, style: .continuous)
-                .fill(Theme.Palette.surface)
+            RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusLarge, style: .continuous)
+                .fill(Theme.Palette.surfaceRaised)
         )
         .overlay(
-            RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadius, style: .continuous)
-                .strokeBorder(Theme.Palette.hairlineStrong, lineWidth: 1)
+            RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusLarge, style: .continuous)
+                .strokeBorder(Theme.Palette.rim, lineWidth: 1)
         )
         .shadow(color: .black.opacity(0.5), radius: 24, y: 10)
         .position(cardPosition(hole: hole, cardWidth: cardWidth, in: size))

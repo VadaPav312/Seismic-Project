@@ -49,8 +49,10 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
     /// The five that get a tab. The rest are reached from Home and from the
     /// More menu — a bar of nine icons is a bar nobody can use in a hurry.
     static let primary: [AppSection] = [.home, .monitor, .simulator, .map, .library]
+    /// Reached from the More menu. Settings is deliberately absent — it has its
+    /// own button in the toolbar.
     static let secondary: [AppSection] = [.assess, .analysis, .node, .feed, .prepare,
-                                         .household, .network, .shakeTable, .settings]
+                                          .household, .network, .shakeTable]
 }
 
 struct RootView: View {
@@ -289,6 +291,20 @@ struct RootView: View {
 
     @ToolbarContentBuilder
     private func toolbarContent(for section: AppSection) -> some ToolbarContent {
+        // Settings gets its own button rather than living in the overflow menu.
+        // It is the one destination people go looking for by habit, and hiding
+        // the habitual thing behind a menu is how an app earns a reputation for
+        // being hard to use.
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                Haptics.shared.play(.selection)
+                show(.settings)
+            } label: {
+                Image(systemName: "gearshape")
+            }
+            .accessibilityLabel("Settings")
+        }
+
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
                 ForEach(AppSection.secondary) { item in

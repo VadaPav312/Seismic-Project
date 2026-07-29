@@ -99,10 +99,19 @@ enum Theme {
             scheme == .dark ? textSecondary : Color(red: 0.30, green: 0.34, blue: 0.42)
         }
 
-        // Kept so existing call sites keep working; both now mean "glass".
-        static let surface = glass
-        static let surfaceRaised = glassStrong
-        static let surfaceHighest = Color.white.opacity(0.14)
+        /// Opaque surfaces, for anything filled directly rather than through
+        /// `instrumentPanel()`.
+        ///
+        /// These are deliberately *not* the glass tokens. Glass only works when
+        /// something composites it — a material underneath, a rim on top. Used
+        /// as a bare fill it is a 6% white wash that shows whatever is behind
+        /// it, which is how the tutorial card ended up transparent with the
+        /// Home screen legible through it. Chart backdrops, field wells and
+        /// sheet chrome need a real colour, and these are the glass tones
+        /// pre-composited over the background.
+        static let surface = Color(red: 0.075, green: 0.086, blue: 0.145)
+        static let surfaceRaised = Color(red: 0.106, green: 0.118, blue: 0.184)
+        static let surfaceHighest = Color(red: 0.145, green: 0.161, blue: 0.235)
     }
 
     // MARK: Typography
