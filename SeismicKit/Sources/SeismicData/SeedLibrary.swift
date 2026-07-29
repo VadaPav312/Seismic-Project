@@ -1,5 +1,6 @@
 import Foundation
 import SeismicCore
+import SeismicGeo
 import SeismicSignal
 
 /// Everything the app ships knowing.
@@ -34,7 +35,8 @@ public enum SeedLibrary {
                     + "seismic performance. It came through Loma Prieta in 1989 undamaged, "
                     + "though the top reportedly swayed nearly a foot for over a minute.",
                 events: ["1989 Loma Prieta — no structural damage"],
-                image: "triangle"),
+                image: "triangle",
+                plan: .square),
 
             building(
                 name: "Tokyo Skytree",
@@ -49,7 +51,8 @@ public enum SeedLibrary {
                     + "traditional five-storey pagodas, none of which is recorded as having "
                     + "collapsed in an earthquake.",
                 events: ["2011 Tōhoku — under construction, undamaged"],
-                image: "antenna.radiowaves.left.and.right"),
+                image: "antenna.radiowaves.left.and.right",
+                plan: .triangular),
 
             building(
                 name: "Torre Latinoamericana",
@@ -79,7 +82,8 @@ public enum SeedLibrary {
                     + "perimeter frame. Designed to remain occupiable after a major earthquake "
                     + "rather than merely to avoid collapse — a much higher bar.",
                 events: [],
-                image: "building.2"),
+                image: "building.2",
+                plan: .square),
 
             building(
                 name: "Christchurch Arts Centre",
@@ -95,7 +99,8 @@ public enum SeedLibrary {
                     + "retrofitted beneath the historic fabric.",
                 events: ["2010 Darfield — damage", "2011 Christchurch — severe damage",
                          "2011–2022 — base isolation retrofit"],
-                image: "building.columns.fill"),
+                image: "building.columns.fill",
+                plan: .uShaped),
 
             building(
                 name: "Ortigas Soft-Storey Apartments",
@@ -173,7 +178,17 @@ public enum SeedLibrary {
         storeys: Int, height: Double, footprintArea: Double, year: Int,
         material: ConstructionMaterial, system: StructuralSystem,
         foundation: FoundationType, soil: SoilClass, retrofit: RetrofitLevel,
-        architect: String?, notes: String, events: [String], image: String
+        architect: String?, notes: String, events: [String], image: String,
+        // The building's actual plan, not a guess.
+        //
+        // Without this every seeded building was extruded from a rectangle of
+        // the right area — so a courtyard block, an L-shaped apartment and a
+        // tapered tower all came out as the same brick. Plan shape is not
+        // decoration: re-entrant corners concentrate stress, and mass placed
+        // away from the centre of rigidity twists a building rather than
+        // pushing it.
+        plan: PlanShape = .rectangular,
+        aspectRatio: Double = 1.6
     ) -> BuildingModel {
         // Every seeded fact carries a source, exactly as an imported one does.
         var provenance: [String: FactProvenance] = [:]
@@ -194,6 +209,7 @@ public enum SeedLibrary {
         return BuildingModel(
             name: name, address: address, latitude: latitude, longitude: longitude,
             storeyCount: storeys, height: height, footprintArea: footprintArea,
+            footprint: plan.polygon(area: footprintArea, aspectRatio: aspectRatio),
             yearBuilt: year, material: material, system: system, foundation: foundation,
             soil: soil, retrofit: retrofit, architect: architect, notes: notes,
             notableEvents: events, provenance: provenance,

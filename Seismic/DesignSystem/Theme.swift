@@ -305,13 +305,22 @@ struct InstrumentPanel: ViewModifier {
             .padding(padding)
             .background(
                 RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .fill(.ultraThinMaterial)
+                    // A pre-composited fill rather than `.ultraThinMaterial`.
+                    //
+                    // A material is a live blur of everything behind it, and a
+                    // scrolling list of ten cards is ten full-screen blurs
+                    // recomputed every frame — which is most of why the library
+                    // stuttered. The background behind these panels is a slow
+                    // gradient wash, so there is almost nothing for a blur to
+                    // reveal that this fill does not already say, and the
+                    // difference on screen is not visible.
+                    .fill(Theme.Palette.surface)
                     .overlay(
                         RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                             .fill(LinearGradient(
-                                colors: [Color.white.opacity(0.10),
-                                         Color.white.opacity(0.03),
-                                         Color.white.opacity(0.015)],
+                                colors: [Color.white.opacity(0.07),
+                                         Color.white.opacity(0.02),
+                                         Color.clear],
                                 startPoint: .top, endPoint: .bottom))
                     )
             )

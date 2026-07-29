@@ -404,11 +404,24 @@ final class BuildingSearchServiceTests: XCTestCase {
         XCTAssertTrue(results.value.contains { $0.name.localizedCaseInsensitiveContains("Transamerica") })
     }
 
+    /// Wikidata is now two calls, not one.
+    ///
+    /// The search index and the SPARQL endpoint are different services, and
+    /// they are used in that order — searching first is what took the query
+    /// from never returning to under a second. Both are stubbed here, and the
+    /// entity id has to survive the hop between them or the details attach to
+    /// the wrong building.
     func testWikidataResultsAreUsedWhenTheEndpointAnswers() async {
         let stub = StubHTTPTransport()
+        stub.stub("wikidata.org/w/api.php", json: """
+        {"search":[
+          {"id":"Q160236","label":"Chrysler Building",
+           "description":"skyscraper in Manhattan, New York"}]}
+        """)
         stub.stub("query.wikidata.org", json: """
         {"results":{"bindings":[
-          {"itemLabel":{"value":"Chrysler Building"},
+          {"item":{"value":"http://www.wikidata.org/entity/Q160236"},
+           "itemLabel":{"value":"Chrysler Building"},
            "height":{"value":"318.9"},
            "floors":{"value":"77"},
            "coord":{"value":"Point(-73.9754 40.7516)"}}]}}
@@ -420,6 +433,24 @@ final class BuildingSearchServiceTests: XCTestCase {
         XCTAssertEqual(results.origin, .live)
         XCTAssertEqual(results.value.first?.name, "Chrysler Building")
         XCTAssertEqual(results.value.first?.latitude ?? 0, 40.7516, accuracy: 1e-4)
+        XCTAssertEqual(results.value.first?.externalID, "Q160236",
+                       "The entity id must survive so facts resolve the right building")
+    }
+
+    /// The search index answering while SPARQL does not must still produce
+    /// candidates — a name and a description is enough to choose from, and the
+    /// details are an enrichment rather than a requirement.
+    func testCandidatesSurviveWhenOnlyTheSearchIndexAnswers() async {
+        let stub = StubHTTPTransport()
+        stub.stub("wikidata.org/w/api.php", json: """
+        {"search":[{"id":"Q160236","label":"Chrysler Building",
+                    "description":"skyscraper in Manhattan"}]}
+        """)
+        let service = BuildingSearchService(
+            vault: vault(["WIKIDATA_ENDPOINT": "https://query.wikidata.org/sparql"]),
+            transport: stub)
+        let results = await service.search("Chrysler Building")
+        XCTAssertTrue(results.value.contains { $0.name == "Chrysler Building" })
     }
 
     func testDeduplicationMergesTheSameBuildingFromTwoProviders() {

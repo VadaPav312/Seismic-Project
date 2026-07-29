@@ -47,14 +47,22 @@ struct AmbientBackground: View {
             }
             // Screen blending keeps the orbs additive, so they lighten the
             // background rather than muddying it the way normal blending would.
-            .blendMode(.screen)
             .allowsHitTesting(false)
+            // Rendered once into a single layer rather than composited live.
+            //
+            // Three large translucent circles over a gradient is three
+            // full-screen blend passes every frame, and they sit behind the
+            // entire app — so every scroll paid for them. `drawingGroup`
+            // flattens the lot into one texture that only re-renders when the
+            // drift animation actually moves it.
+            .compositingGroup()
+            .drawingGroup()
         }
         .onAppear {
             // Reduce Motion gets the colour without the drift. The tint is the
             // point; the movement is decoration.
             guard !reduceMotion else { return }
-            withAnimation(.easeInOut(duration: 32).repeatForever(autoreverses: true)) {
+            withAnimation(.easeInOut(duration: 44).repeatForever(autoreverses: true)) {
                 drifting = true
             }
         }
@@ -68,10 +76,10 @@ struct AmbientBackground: View {
                     center: .center, startRadius: 0, endRadius: diameter / 2)
             )
             .frame(width: diameter, height: diameter)
-            // A real Gaussian blur on a view this large is expensive on older
-            // devices, and unnecessary: the radial gradient is already a soft
-            // falloff. A light blur only smooths the banding.
-            .blur(radius: 42)
+            // No blur. A Gaussian blur on a view this large is genuinely
+            // expensive, and a radial gradient with a transparent outer stop is
+            // already a perfectly smooth falloff — the blur was smoothing
+            // something that had no edges to begin with.
     }
 }
 

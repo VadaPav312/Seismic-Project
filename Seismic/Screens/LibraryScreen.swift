@@ -119,6 +119,14 @@ struct BuildingDetailSheet: View {
 
                     factsSection
                     derivedSection
+                        .task(id: building.id) {
+                            // Computed once when the screen opens, off the
+                            // render path.
+                            let model = ShearBuilding.from(building)
+                            derived = (ModalAnalysis.modes(of: model),
+                                       DriftThresholds.forSystem(building.system,
+                                                                 material: building.material))
+                        }
 
                     if !building.notableEvents.isEmpty {
                         VStack(alignment: .leading, spacing: 6) {
@@ -201,10 +209,19 @@ struct BuildingDetailSheet: View {
     }
 
     /// Derived structural properties, each with the assumption stated in words.
+    /// Cached, because computing it is a full eigendecomposition.
+    ///
+    /// As a computed property this ran on every body evaluation of the detail
+    /// screen — every toggle, every scroll that changed state, every time the
+    /// environment published anything. The building does not change while the
+    /// screen is open, so neither do its modes.
+    @State private var derived: (modes: [ModeShape], thresholds: DriftThresholds)?
+
     private var derivedSection: some View {
         let model = ShearBuilding.from(building)
-        let modes = ModalAnalysis.modes(of: model)
-        let thresholds = DriftThresholds.forSystem(building.system, material: building.material)
+        let modes = derived?.modes ?? ModalAnalysis.modes(of: model)
+        let thresholds = derived?.thresholds
+            ?? DriftThresholds.forSystem(building.system, material: building.material)
 
         return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
             SectionLabel("Derived properties", systemImage: "function")

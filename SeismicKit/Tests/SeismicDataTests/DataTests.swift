@@ -223,6 +223,74 @@ final class LedgerTests: XCTestCase {
 
 final class SeedLibraryTests: XCTestCase {
 
+    // MARK: Plan shapes
+    //
+    // Asserted rather than assumed because the failure is silent: a building
+    // with no footprint is extruded from a rectangle of the right area, which
+    // looks like a building and is the wrong one. Nothing crashes and nothing
+    // logs; the simulator just shows every tower as the same brick.
+
+    func testEverySeededBuildingHasARealFootprint() {
+        for building in SeedLibrary.buildings() {
+            XCTAssertGreaterThanOrEqual(building.footprint.count, 4,
+                                        "\(building.name) has no footprint")
+            XCTAssertTrue(building.footprint.allSatisfy { $0.x.isFinite && $0.y.isFinite },
+                          "\(building.name) has a non-finite vertex")
+        }
+    }
+
+    /// The buildings that are not rectangular must not come out rectangular.
+    func testIrregularBuildingsDoNotFillTheirBoundingBox() {
+        for name in ["Christchurch Arts Centre", "Tokyo Skytree"] {
+            guard let building = SeedLibrary.buildings().first(where: { $0.name == name }) else {
+                XCTFail("\(name) is missing from the library")
+                continue
+            }
+            let xs = building.footprint.map(\.x)
+            let ys = building.footprint.map(\.y)
+            let width = (xs.max() ?? 0) - (xs.min() ?? 0)
+            let depth = (ys.max() ?? 0) - (ys.min() ?? 0)
+            XCTAssertLessThan(planArea(building.footprint), width * depth * 0.95,
+                              "\(name) fills its bounding box — it is still a rectangle")
+        }
+    }
+
+    /// The plan must not change the building's mass.
+    ///
+    /// Every shape is normalised to the stated floor area, so choosing one
+    /// cannot alter the seismic mass and therefore the period. If it could, the
+    /// app would report a period shift that came from a menu selection rather
+    /// than from the building.
+    func testFootprintEnclosesTheStatedFloorArea() {
+        for building in SeedLibrary.buildings() {
+            let measured = planArea(building.footprint)
+            XCTAssertEqual(measured, building.footprintArea,
+                           accuracy: building.footprintArea * 0.03,
+                           "\(building.name): outline encloses \(Int(measured)) m2 "
+                           + "but claims \(Int(building.footprintArea)) m2")
+        }
+    }
+
+    /// Shoelace formula, written out rather than reused from the geometry code
+    /// so the test does not check an implementation against itself.
+    private func planArea(_ ring: [Coordinate2D]) -> Double {
+        var points = ring
+        if let first = points.first, let last = points.last,
+           abs(first.x - last.x) < 1e-9, abs(first.y - last.y) < 1e-9 {
+            points.removeLast()
+        }
+        guard points.count >= 3 else { return 0 }
+
+        var sum = 0.0
+        for index in points.indices {
+            let a = points[index]
+            let b = points[(index + 1) % points.count]
+            sum += a.x * b.y - b.x * a.y
+        }
+        return abs(sum) / 2
+    }
+
+
     func testShipsAUsefulLibraryOfBuildings() {
         let buildings = SeedLibrary.buildings()
         XCTAssertGreaterThanOrEqual(buildings.count, 6)

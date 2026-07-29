@@ -159,8 +159,14 @@ struct MonitorScreen: View {
             }
         }
         // Re-prepared when the data changes or a control moves — not on every
-        // body evaluation.
-        .task(id: node.revision) { prepare() }
+        // body evaluation, and not on every sample either.
+        //
+        // The node publishes twenty times a second. Filtering thirty seconds of
+        // three axes is about nine thousand samples of IIR per pass, so doing it
+        // on every revision was nine thousand samples twenty times a second for
+        // a trace that cannot visibly change that fast. Every third revision is
+        // still about seven updates a second, which reads as perfectly live.
+        .task(id: node.revision / 3) { prepare() }
         .onChange(of: windowSeconds) { _, _ in prepare() }
         .onChange(of: showsFiltered) { _, _ in prepare() }
         .onChange(of: frozen == nil) { _, _ in prepare() }
