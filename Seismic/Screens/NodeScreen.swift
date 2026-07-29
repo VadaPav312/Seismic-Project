@@ -477,10 +477,14 @@ struct ActuatorRow: View {
                     Text(kind.label)
                         .font(Theme.Typography.callout.weight(.medium))
                         .foregroundStyle(Theme.Palette.textPrimary)
+                        .lineLimit(1)
                     Text(state.label)
                         .font(Theme.Typography.caption)
                         .foregroundStyle(tint)
+                        .lineLimit(1)
                 }
+                // The name yields when the row is tight; the buttons do not.
+                .layoutPriority(-1)
 
                 Spacer(minLength: 0)
 
@@ -491,19 +495,25 @@ struct ActuatorRow: View {
                 // the word and the padding became invisible dead space around
                 // it. These are the controls that shut off somebody's gas
                 // supply; they get a full 44pt target like everything else.
+                // No padding or height of their own: `SecondaryButtonStyle`
+                // already applies both, and adding a second helping made each of
+                // these chips about 93pt wide. Two of those plus the icon left
+                // roughly 77pt for the name, which is why "Mains power" arrived
+                // as "Mains po…" and, before `lineLimit`, why "Fire" itself was
+                // broken across two lines as "Fir/e". A control that shuts off a
+                // gas supply cannot be allowed to become unreadable because the
+                // label beside it is long.
                 Button { send(.fireActuator(kind)) } label: {
                     Text("Fire")
-                        .font(Theme.Typography.label)
-                        .padding(.horizontal, 16)
-                        .frame(height: Theme.Metrics.minimumTapTarget)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .buttonStyle(SecondaryButtonStyle())
 
                 Button { send(.resetActuator(kind)) } label: {
                     Text("Reset")
-                        .font(Theme.Typography.label)
-                        .padding(.horizontal, 16)
-                        .frame(height: Theme.Metrics.minimumTapTarget)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                 }
                 .buttonStyle(SecondaryButtonStyle())
             }

@@ -111,21 +111,34 @@ struct HomeScreen: View {
     /// would be dishonest. This states the baseline instead, which is genuinely
     /// the useful thing to know.
     private func baselineOnlyPanel(_ building: BuildingModel) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+        // Bound to explicitly typed constants before formatting, rather than
+        // written inline inside `String(format:)`.
+        //
+        // Inline, `?? 19` reached the formatter as an `Int` against a `%.1f`
+        // specifier: Foundation logged a fault on every single launch — "Format
+        // '%.1f' does not match expected '%lld'" — and the temperature on screen
+        // was whatever reinterpreting those bytes as a double produced. The
+        // parameter is `CVarArg...`, which accepts anything, so nothing
+        // constrained the literal to `Double` and no warning was emitted either.
+        //
+        // Annotating the type is what makes the compiler check it. Worth doing
+        // wherever a numeric literal meets a format string through `??`.
+        let measuredPeriod: Double = node.snapshot?.telemetry.measuredPeriod
+            ?? building.empiricalPeriod
+        let temperature: Double = node.snapshot?.telemetry.structureTemperature ?? 19
+
+        return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
             SectionLabel("Baseline", systemImage: "waveform.path.ecg")
 
             ReadoutGrid(readouts: [
                 Readout(label: "Measured period",
-                        value: String(format: "%.3f",
-                                      node.snapshot?.telemetry.measuredPeriod
-                                      ?? building.empiricalPeriod),
+                        value: String(format: "%.3f", measuredPeriod),
                         unit: "s", tint: Theme.Palette.accent, size: .large),
                 Readout(label: "Expected for this type",
                         value: String(format: "%.2f", building.empiricalPeriod), unit: "s",
                         size: .medium),
                 Readout(label: "Structure temperature",
-                        value: String(format: "%.1f",
-                                      node.snapshot?.telemetry.structureTemperature ?? 19),
+                        value: String(format: "%.1f", temperature),
                         unit: "°C", size: .medium),
                 Readout(label: "Measurements on record",
                         value: "\(env.observations.filter { $0.modeNumber == 1 }.count)",
