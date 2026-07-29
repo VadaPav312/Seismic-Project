@@ -46,6 +46,7 @@ struct LibraryScreen: View {
                 }
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
         .searchable(text: $query, prompt: "Search your library")
         .toolbar {

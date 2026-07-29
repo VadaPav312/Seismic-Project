@@ -36,6 +36,7 @@ struct HouseholdScreen: View {
                 }
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
         .sheet(isPresented: $showingAuth) { AuthSheet() }
         .sheet(isPresented: Binding(get: { shareableMessage != nil },

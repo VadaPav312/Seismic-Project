@@ -514,38 +514,76 @@ struct SkeletonBlock: View {
 
 // MARK: - Buttons
 
+/// The filled action.
+///
+/// A gradient rather than a flat fill, with a bright inner top edge and a glow
+/// beneath it in the accent's own colour. The glow is what makes a primary
+/// button look like it is emitting light rather than sitting there — and it is
+/// the one place in the interface allowed to be that bright, which is why it
+/// always reads as *the* action on a screen.
+///
+/// The padding is deliberately inside the style. Applying it outside would put
+/// the spacing beyond the background, so the fill would hug the label with dead
+/// space around it.
 struct PrimaryButtonStyle: ButtonStyle {
     var tint: Color = Theme.Palette.accent
     var destructive = false
 
+    private var fill: LinearGradient {
+        destructive
+            ? LinearGradient(colors: [Theme.Palette.verdictRed,
+                                      Theme.Palette.verdictRed.opacity(0.82)],
+                             startPoint: .topLeading, endPoint: .bottomTrailing)
+            : Theme.Palette.accentGradient
+    }
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .foregroundStyle(destructive ? Color.white : Color.black.opacity(0.88))
+            .font(Theme.Typography.headline)
+            .foregroundStyle(.white)
+            .padding(.horizontal, Theme.Metrics.s5)
+            .frame(minHeight: Theme.Metrics.minimumTapTarget)
             .background(
-                RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall, style: .continuous)
-                    .fill(destructive ? Theme.Palette.verdictRed : tint)
-                    .opacity(configuration.isPressed ? 0.75 : 1)
+                Capsule(style: .continuous)
+                    .fill(fill)
+                    .overlay(
+                        // The light catching the top edge of a physical button.
+                        Capsule(style: .continuous)
+                            .strokeBorder(
+                                LinearGradient(colors: [Color.white.opacity(0.45),
+                                                        Color.white.opacity(0.05)],
+                                               startPoint: .top, endPoint: .bottom),
+                                lineWidth: 1)
+                    )
             )
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
-            .animation(Theme.Motion.quick, value: configuration.isPressed)
+            .shadow(color: (destructive ? Theme.Palette.verdictRed : tint).opacity(0.42),
+                    radius: configuration.isPressed ? 8 : 18, y: configuration.isPressed ? 3 : 8)
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .animation(Theme.Motion.press, value: configuration.isPressed)
     }
 }
 
+/// The quieter action: the same shape in glass rather than colour, so the two
+/// sit side by side as siblings instead of as a button and a link.
 struct SecondaryButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
+            .font(Theme.Typography.headline)
             .foregroundStyle(Theme.Palette.textPrimary)
+            .padding(.horizontal, Theme.Metrics.s5)
+            .frame(minHeight: Theme.Metrics.minimumTapTarget)
             .background(
-                RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall, style: .continuous)
-                    .fill(Theme.Palette.surfaceRaised)
-                    .opacity(configuration.isPressed ? 0.7 : 1)
+                Capsule(style: .continuous)
+                    .fill(.ultraThinMaterial)
+                    .overlay(Capsule(style: .continuous).fill(Theme.Palette.glassStrong))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall, style: .continuous)
-                    .strokeBorder(Theme.Palette.hairlineStrong, lineWidth: 1)
+                Capsule(style: .continuous)
+                    .strokeBorder(Theme.Palette.rim, lineWidth: 1)
             )
-            .scaleEffect(configuration.isPressed ? 0.98 : 1)
-            .animation(Theme.Motion.quick, value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed ? 0.96 : 1)
+            .opacity(configuration.isPressed ? 0.86 : 1)
+            .animation(Theme.Motion.press, value: configuration.isPressed)
     }
 }
 

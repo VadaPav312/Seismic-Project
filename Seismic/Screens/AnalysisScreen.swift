@@ -106,6 +106,7 @@ struct AnalysisScreen: View {
                 }
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
         .task(id: recordSource) { await compute() }
         .task(id: env.observations.count) { trainAnomalyModel() }

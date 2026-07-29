@@ -36,6 +36,7 @@ struct HomeScreen: View {
                 }
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
         .refreshable { env.refresh() }
         .sheet(isPresented: $showingImport) { BuildingImportSheet() }

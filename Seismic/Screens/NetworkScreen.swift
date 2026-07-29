@@ -35,6 +35,7 @@ struct NetworkScreen: View {
                 }
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
     }
 

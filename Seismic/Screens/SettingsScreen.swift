@@ -498,6 +498,7 @@ struct LedgerScreen: View {
                 .instrumentPanel()
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
         .navigationTitle("Ledger")
         .onAppear { verify() }

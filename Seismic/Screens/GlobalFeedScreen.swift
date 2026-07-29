@@ -56,6 +56,7 @@ struct GlobalFeedScreen: View {
                 }
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
         .refreshable { await reload() }
         .task { await reload() }

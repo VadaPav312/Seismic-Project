@@ -91,6 +91,7 @@ struct CommunityMapScreen: View {
                 timeSlider
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {

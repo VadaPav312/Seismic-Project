@@ -176,6 +176,7 @@ struct SimulatorScreen: View {
             .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12,
                                                                  style: .continuous))
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
     }
 

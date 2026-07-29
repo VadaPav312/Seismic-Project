@@ -40,6 +40,7 @@ struct ShakeTableScreen: View {
                 controls
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
         .onDisappear { stop() }
         .task { await computePrediction() }

@@ -68,6 +68,7 @@ struct PreparednessScreen: View {
                 .buttonStyle(SecondaryButtonStyle())
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
     }
 

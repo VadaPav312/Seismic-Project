@@ -42,6 +42,7 @@ struct AssessScreen: View {
                 }
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
         .sheet(isPresented: $showingReport) {
             if let assessment, let building {

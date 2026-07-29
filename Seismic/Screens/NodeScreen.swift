@@ -22,6 +22,7 @@ struct NodeScreen: View {
                 logView
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
         .sheet(isPresented: $showingScanner) { NodeScannerSheet() }
     }
@@ -663,6 +664,7 @@ struct AlgorithmCatalogScreen: View {
                 }
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
     }
 

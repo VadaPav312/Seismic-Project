@@ -53,6 +53,7 @@ struct EventTakeoverView: View {
                 safeButton
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
         .onReceive(ticker) { _ in
             elapsed = Date().timeIntervalSince(event.startedAt)

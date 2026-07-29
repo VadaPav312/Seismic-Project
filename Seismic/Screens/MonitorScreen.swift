@@ -135,6 +135,7 @@ struct MonitorScreen: View {
                 }
             }
             .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
