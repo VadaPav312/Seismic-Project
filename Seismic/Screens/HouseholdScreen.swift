@@ -373,7 +373,8 @@ struct AuthSheet: View {
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(alignment: .leading, spacing: Theme.Metrics.spacingLoose) {
+                VStack(alignment: isLaunchGate ? .center : .leading,
+                       spacing: Theme.Metrics.spacingLoose) {
                     if isLaunchGate { launchHeader }
 
                     Text("Signing in backs up your buildings and lets a household share them. "
@@ -381,7 +382,14 @@ struct AuthSheet: View {
                         .font(Theme.Typography.callout)
                         .foregroundStyle(Theme.Palette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(isLaunchGate ? .center : .leading)
 
+                    // Rounded to match every other control on the screen.
+                    // `SignInWithAppleButton` draws its own square-cornered
+                    // background, so it is clipped to the same capsule the
+                    // Google button and the primary style use — otherwise it is
+                    // the one hard-edged rectangle in an interface where
+                    // nothing else has a corner.
                     SignInWithAppleButton(.signIn) { request in
                         request.requestedScopes = [.fullName, .email]
                     } onCompletion: { result in
@@ -389,6 +397,7 @@ struct AuthSheet: View {
                     }
                     .signInWithAppleButtonStyle(.white)
                     .frame(height: Theme.Metrics.minimumTapTarget)
+                    .clipShape(Capsule(style: .continuous))
 
                     Button {
                         signInWithGoogle()
@@ -439,23 +448,27 @@ struct AuthSheet: View {
     /// anything, because a sign-in form with no context is a reason to close an
     /// app rather than a reason to use it.
     private var launchHeader: some View {
-        VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+        VStack(spacing: Theme.Metrics.spacing) {
             Image(systemName: "waveform.path.ecg")
-                .font(.system(size: 34, weight: .thin))
+                .font(.system(size: 40, weight: .thin))
                 .foregroundStyle(Theme.Palette.accent)
 
             Text("SEISMIC")
-                .font(.system(size: 26, weight: .semibold))
-                .tracking(5)
+                .font(.system(size: 28, weight: .semibold))
+                // Wide tracking needs the trailing space compensated, or a
+                // centred wordmark sits visibly left of centre.
+                .tracking(6)
+                .padding(.leading, 6)
                 .foregroundStyle(Theme.Palette.textPrimary)
 
             Text("Know whether your building is safe to be in — from its own "
                  + "measurements, not from a guess.")
                 .font(Theme.Typography.callout)
                 .foregroundStyle(Theme.Palette.textSecondary)
+                .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity)
         .padding(.bottom, Theme.Metrics.spacing)
     }
 
@@ -468,7 +481,7 @@ struct AuthSheet: View {
     }
 
     private var emailForm: some View {
-        VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+        VStack(alignment: isLaunchGate ? .center : .leading, spacing: Theme.Metrics.spacing) {
             Picker("Mode", selection: $mode) {
                 Text("Sign in").tag(Mode.signIn)
                 Text("Create an account").tag(Mode.signUp)
@@ -513,10 +526,13 @@ struct AuthSheet: View {
     }
 
     private func field(_ title: String, text: Binding<String>, secure: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: isLaunchGate ? .center : .leading, spacing: 4) {
             Text(title)
                 .font(Theme.Typography.label)
+                .tracking(0.8)
                 .foregroundStyle(Theme.Palette.textTertiary)
+                .frame(maxWidth: .infinity,
+                       alignment: isLaunchGate ? .center : .leading)
             Group {
                 if secure { SecureField("", text: text) } else { TextField("", text: text) }
             }
@@ -524,9 +540,12 @@ struct AuthSheet: View {
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled()
             .font(Theme.Typography.body)
-            .padding(12)
-            .background(RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall)
-                .fill(Theme.Palette.surfaceRaised))
+            .multilineTextAlignment(isLaunchGate ? .center : .leading)
+            .padding(.horizontal, Theme.Metrics.s4)
+            .frame(height: Theme.Metrics.minimumTapTarget)
+            .background(Capsule(style: .continuous).fill(Theme.Palette.surfaceRaised))
+            .overlay(Capsule(style: .continuous)
+                .strokeBorder(Theme.Palette.hairline, lineWidth: 1))
         }
     }
 

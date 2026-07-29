@@ -269,25 +269,19 @@ struct TutorialOverlay: View {
                 .foregroundStyle(Theme.Palette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            // No padding on the labels. The button styles apply their own, and
+            // applying it twice made three controls too wide for the card —
+            // which is why the words collapsed to an ellipsis and a stray
+            // glyph rather than reading "Back" and "Next".
             HStack(spacing: Theme.Metrics.spacing) {
-                Button("End tour") {
-                    Haptics.shared.play(.selection)
-                    withAnimation(Theme.Motion.gentle) { director.finish() }
-                }
-                .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.Palette.textTertiary)
-
-                Spacer(minLength: 0)
-
                 if director.index > 0 {
                     Button {
                         Haptics.shared.play(.selection)
                         director.back()
                     } label: {
                         Text("Back")
-                            .font(Theme.Typography.callout)
-                            .padding(.horizontal, 18)
-                            .frame(height: 40)
+                            .lineLimit(1)
+                            .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(SecondaryButtonStyle())
                 }
@@ -297,9 +291,8 @@ struct TutorialOverlay: View {
                     withAnimation(Theme.Motion.gentle) { director.advance() }
                 } label: {
                     Text(director.isLastStep ? "Done" : "Next")
-                        .font(Theme.Typography.headline)
-                        .padding(.horizontal, 22)
-                        .frame(height: 40)
+                        .lineLimit(1)
+                        .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(PrimaryButtonStyle())
             }
@@ -321,30 +314,20 @@ struct TutorialOverlay: View {
         .position(cardPosition(hole: hole, cardWidth: cardWidth, in: size))
     }
 
-    /// Puts the card where it does not cover the thing it is describing.
+    /// Pins the card to the bottom of the screen.
     ///
-    /// The estimate of the card's own height is deliberately generous. Getting
-    /// it slightly wrong moves the card a few points; measuring it properly
-    /// would need another layout pass, and a card that lands 20 points off is
-    /// invisible next to one that covers the control it is pointing at.
+    /// It used to float beside whatever it was describing, which meant it
+    /// landed in the middle of the screen and covered the very interface it was
+    /// explaining. Anchoring it to the bottom keeps the whole app visible above
+    /// it — and a tour whose subject is hidden behind the tour is no tour at
+    /// all.
+    ///
+    /// The height estimate is deliberately generous; landing twenty points off
+    /// is invisible next to covering the control being described.
     private func cardPosition(hole: CGRect?, cardWidth: CGFloat, in size: CGSize) -> CGPoint {
-        let estimatedHeight: CGFloat = 260
-        let margin: CGFloat = 24
-        let x = size.width / 2
-
-        guard let hole else { return CGPoint(x: x, y: size.height / 2) }
-
-        let below = hole.maxY + margin + estimatedHeight / 2
-        let above = hole.minY - margin - estimatedHeight / 2
-
-        if below + estimatedHeight / 2 < size.height - margin {
-            return CGPoint(x: x, y: below)
-        }
-        if above - estimatedHeight / 2 > margin {
-            return CGPoint(x: x, y: above)
-        }
-        // Nowhere clear: centre it and accept the overlap rather than pushing
-        // the card off the screen entirely.
-        return CGPoint(x: x, y: size.height / 2)
+        let estimatedHeight: CGFloat = 250
+        let bottomInset: CGFloat = 34   // clears the home indicator and the tab bar
+        return CGPoint(x: size.width / 2,
+                       y: size.height - bottomInset - estimatedHeight / 2)
     }
 }

@@ -115,66 +115,165 @@ public struct BuildingFactSet: Sendable, Equatable, Codable {
 struct WikidataClient: Sendable {
     let endpoint: URL
 
-    static func query(for name: String) -> String {
-        // Deliberately conservative: instances of building (Q41176) or anything
-        // beneath it, matching the label, with the fields we can actually use.
-        let escaped = name.replacingOccurrences(of: "\"", with: "")
+    /// Wikidata's own search index, which is a different service from the
+    /// SPARQL endpoint and answers in milliseconds.
+    static let searchEndpoint = URL(string: "https://www.wikidata.org/w/api.php")!
+
+    /// Details for a known set of entities.
+    ///
+    /// `VALUES` pins the query to a handful of specific items, so the engine
+    /// looks up eight entities instead of scanning the graph.
+    ///
+    /// This replaces a query that could not work. The previous one matched on
+    /// `rdfs:label` with a `CONTAINS` filter *before* narrowing by type, which
+    /// asks Wikidata to lowercase and substring-search every label it holds —
+    /// hundreds of millions of them — and only then check whether each result
+    /// is a building. Measured against the live endpoint it returned nothing at
+    /// all in sixty seconds. Searching first and resolving second takes about
+    /// eight hundred milliseconds for the same answer.
+    static func detailQuery(ids: [String]) -> String {
+        // Q-numbers only. These are interpolated into a query, and anything
+        // else reaching that string is an injection.
+        let values = ids
+            .filter { $0.first == "Q" && $0.dropFirst().allSatisfy(\.isNumber) }
+            .map { "wd:\($0)" }
+            .joined(separator: " ")
+
         return """
-        SELECT ?item ?itemLabel ?height ?floors ?inception ?architectLabel ?coord ?adminLabel WHERE {
-          ?item rdfs:label ?label .
-          FILTER(CONTAINS(LCASE(?label), LCASE("\(escaped)")) && LANG(?label) = "en")
-          ?item wdt:P31/wdt:P279* wd:Q41176 .
+        SELECT ?item ?itemLabel ?height ?floors ?inception ?architectLabel ?coord ?adminLabel
+               ?materialLabel WHERE {
+          VALUES ?item { \(values) }
           OPTIONAL { ?item wdt:P2048 ?height . }
           OPTIONAL { ?item wdt:P1101 ?floors . }
           OPTIONAL { ?item wdt:P571 ?inception . }
           OPTIONAL { ?item wdt:P84 ?architect . }
           OPTIONAL { ?item wdt:P625 ?coord . }
           OPTIONAL { ?item wdt:P131 ?admin . }
+          OPTIONAL { ?item wdt:P186 ?material . }
           SERVICE wikibase:label { bd:serviceParam wikibase:language "en". }
         }
-        LIMIT 12
         """
     }
 
-    func search(_ name: String, client: ResilientClient) async throws -> [BuildingCandidate] {
+    /// One search hit, before any details have been fetched.
+    struct SearchHit: Decodable {
+        let id: String
+        let label: String?
+        let description: String?
+    }
+
+    private struct SearchResponse: Decodable {
+        let search: [SearchHit]
+    }
+
+    /// Finds candidate entities by name, using the indexed search API.
+    func entities(matching name: String, client: ResilientClient,
+                  limit: Int = 8) async throws -> [SearchHit] {
+        var components = URLComponents(url: Self.searchEndpoint, resolvingAgainstBaseURL: false)
+        components?.queryItems = [
+            URLQueryItem(name: "action", value: "wbsearchentities"),
+            URLQueryItem(name: "search", value: name),
+            URLQueryItem(name: "language", value: "en"),
+            URLQueryItem(name: "uselang", value: "en"),
+            URLQueryItem(name: "type", value: "item"),
+            URLQueryItem(name: "limit", value: String(limit)),
+            URLQueryItem(name: "format", value: "json"),
+            URLQueryItem(name: "origin", value: "*"),
+        ]
+        guard let url = components?.url else {
+            throw ServiceError.notConfigured("Wikidata search")
+        }
+
+        let request = HTTPRequest(
+            url: url,
+            headers: ["Accept": "application/json",
+                      "User-Agent": "Seismic/1.0 (structural safety app)"],
+            timeout: 10)
+        return try await client.json(request, as: SearchResponse.self).search
+    }
+
+    /// Fetches the structural facts for a set of entity ids.
+    func details(for ids: [String], client: ResilientClient) async throws -> SPARQLResponse {
+        guard !ids.isEmpty else {
+            return SPARQLResponse(results: .init(bindings: []))
+        }
         var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
-        components?.queryItems = [URLQueryItem(name: "query", value: Self.query(for: name)),
-                                  URLQueryItem(name: "format", value: "json")]
-        guard let url = components?.url else { throw ServiceError.notConfigured("Wikidata endpoint") }
+        components?.queryItems = [
+            URLQueryItem(name: "query", value: Self.detailQuery(ids: ids)),
+            URLQueryItem(name: "format", value: "json"),
+        ]
+        guard let url = components?.url else {
+            throw ServiceError.notConfigured("Wikidata endpoint")
+        }
 
-        let request = HTTPRequest(url: url,
-                                  headers: ["Accept": "application/sparql-results+json",
-                                            "User-Agent": "Seismic/1.0 (structural safety app)"],
-                                  timeout: 20)
-        let response: SPARQLResponse = try await client.json(request, as: SPARQLResponse.self)
+        let request = HTTPRequest(
+            url: url,
+            headers: ["Accept": "application/sparql-results+json",
+                      "User-Agent": "Seismic/1.0 (structural safety app)"],
+            // Well under what the endpoint itself allows. A query that has not
+            // answered in fifteen seconds is not going to, and the import flow
+            // has a bundled library to fall back on.
+            timeout: 15)
+        return try await client.json(request, as: SPARQLResponse.self)
+    }
 
-        return response.results.bindings.compactMap { row -> BuildingCandidate? in
-            guard let label = row["itemLabel"]?.value else { return nil }
-            let coordinate = row["coord"].flatMap { Self.parsePoint($0.value) }
+    func search(_ name: String, client: ResilientClient) async throws -> [BuildingCandidate] {
+        let hits = try await entities(matching: name, client: client)
+        guard !hits.isEmpty else { return [] }
+
+        // The description alone is enough to show a candidate list, so results
+        // appear immediately; the SPARQL round trip only enriches them.
+        let details = (try? await details(for: hits.map(\.id), client: client))
+            ?? SPARQLResponse(results: .init(bindings: []))
+
+        var byID: [String: [String: SPARQLResponse.Binding]] = [:]
+        for row in details.results.bindings {
+            guard let uri = row["item"]?.value,
+                  let id = uri.split(separator: "/").last.map(String.init) else { continue }
+            byID[id] = row
+        }
+
+        return hits.compactMap { hit -> BuildingCandidate? in
+            let row = byID[hit.id]
+            let coordinate = row?["coord"].flatMap { Self.parsePoint($0.value) }
+            let name = hit.label ?? row?["itemLabel"]?.value
+            guard let name else { return nil }
+
+            let subtitle = [row?["adminLabel"]?.value ?? hit.description,
+                            row?["inception"].map { String($0.value.prefix(4)) }]
+                .compactMap { $0 }.joined(separator: " · ")
+
             return BuildingCandidate(
-                name: label,
-                subtitle: [row["adminLabel"]?.value,
-                           row["inception"].map { String($0.value.prefix(4)) }]
-                    .compactMap { $0 }.joined(separator: " · "),
+                name: name,
+                subtitle: subtitle,
                 latitude: coordinate?.latitude,
                 longitude: coordinate?.longitude,
-                externalID: row["item"]?.value,
+                externalID: hit.id,
                 provider: "Wikidata",
-                confidence: 0.85,
-                snippet: row["architectLabel"].map { "Architect: \($0.value)" } ?? "")
+                // A hit with structural facts behind it is worth more than a
+                // name that merely matched.
+                confidence: row?["height"] != nil ? 0.88 : 0.62,
+                snippet: [row?["architectLabel"].map { "Architect: \($0.value)" },
+                          hit.description]
+                    .compactMap { $0 }.joined(separator: ". "))
         }
     }
 
-    func facts(_ name: String, client: ResilientClient) async throws -> BuildingFactSet {
-        var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
-        components?.queryItems = [URLQueryItem(name: "query", value: Self.query(for: name)),
-                                  URLQueryItem(name: "format", value: "json")]
-        guard let url = components?.url else { throw ServiceError.notConfigured("Wikidata endpoint") }
-        let request = HTTPRequest(url: url,
-                                  headers: ["Accept": "application/sparql-results+json",
-                                            "User-Agent": "Seismic/1.0 (structural safety app)"],
-                                  timeout: 20)
-        let response: SPARQLResponse = try await client.json(request, as: SPARQLResponse.self)
+    /// Facts for a building, by name or by entity id.
+    ///
+    /// An id is preferred: the candidate the user actually chose already
+    /// carries one, and resolving it directly avoids searching for a name that
+    /// may match several buildings and picking the wrong one.
+    func facts(_ name: String, entityID: String? = nil,
+               client: ResilientClient) async throws -> BuildingFactSet {
+        let ids: [String]
+        if let entityID, entityID.first == "Q" {
+            ids = [entityID]
+        } else {
+            ids = try await entities(matching: name, client: client, limit: 3).map(\.id)
+        }
+
+        let response = try await details(for: ids, client: client)
         guard let row = response.results.bindings.first else { throw ServiceError.emptyResult }
 
         var set = BuildingFactSet()
@@ -219,9 +318,14 @@ struct WikidataClient: Sendable {
 }
 
 struct SPARQLResponse: Decodable {
-    struct Results: Decodable { var bindings: [[String: Binding]] }
+    struct Results: Decodable {
+        var bindings: [[String: Binding]]
+        init(bindings: [[String: Binding]]) { self.bindings = bindings }
+    }
     struct Binding: Decodable { var value: String }
     var results: Results
+
+    init(results: Results) { self.results = results }
 }
 
 /// Overpass — OpenStreetMap. Also keyless, and the only source that gives a
@@ -736,7 +840,9 @@ public actor BuildingSearchService {
 
         if let endpoint = vault.value(for: .wikidataEndpoint).flatMap(URL.init(string:)),
            let set = try? await WikidataClient(endpoint: endpoint)
-               .facts(candidate.name, client: client), !set.isEmpty {
+               .facts(candidate.name,
+                      entityID: candidate.provider == "Wikidata" ? candidate.externalID : nil,
+                      client: client), !set.isEmpty {
             merged.merge(set)
             providers.append("Wikidata")
         }
