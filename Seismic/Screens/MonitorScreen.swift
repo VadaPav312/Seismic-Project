@@ -36,6 +36,23 @@ struct MonitorScreen: View {
     /// draws, and decimated to what the screen can actually resolve.
     @State private var prepared = TriaxialRecord.zeros(count: 0, sampleRate: 100)
 
+    /// Peak ground motion for the visible window.
+    ///
+    /// Computed alongside the filtering rather than in the view body. It reads
+    /// like a cheap lookup and is not: deriving peak velocity and displacement
+    /// integrates the whole window twice, and a profile of this screen showed
+    /// the integration running on SwiftUI's render thread — the single largest
+    /// consumer on a screen that was holding a core at ninety-five per cent.
+    @State private var peaks: PeakValues?
+
+    /// The chart's vertical scale, computed once per window.
+    ///
+    /// `WaveformChart` otherwise derives it by scanning every sample for its
+    /// peak — inside the Canvas closure, so once per redraw per channel. A
+    /// profile put that scan among the largest costs on the screen, which is
+    /// absurd for a number that changes only when the data does.
+    @State private var displayScale: Double?
+
     private var visible: TriaxialRecord {
         guard record.count > 0 else { return record }
         let from = max(record.duration - windowSeconds, 0)
@@ -53,7 +70,11 @@ struct MonitorScreen: View {
 
     private func prepare() {
         let window = visible
-        guard window.count > 32 else { prepared = window; return }
+        guard window.count > 32 else {
+            prepared = window
+            peaks = nil
+            return
+        }
 
         let source: TriaxialRecord
         if showsFiltered {
@@ -71,6 +92,10 @@ struct MonitorScreen: View {
         prepared = TriaxialRecord(x: Self.decimated(source.x),
                                   y: Self.decimated(source.y),
                                   z: Self.decimated(source.z))
+        peaks = GroundMotion.peaks(window)
+        displayScale = max(max(prepared.x.peakAbsolute,
+                               max(prepared.y.peakAbsolute, prepared.z.peakAbsolute)) * 1.25,
+                           1e-4)
     }
 
     private static func decimated(_ waveform: Waveform) -> Waveform {
@@ -166,7 +191,7 @@ struct MonitorScreen: View {
         // on every revision was nine thousand samples twenty times a second for
         // a trace that cannot visibly change that fast. Every third revision is
         // still about seven updates a second, which reads as perfectly live.
-        .task(id: node.revision / 3) { prepare() }
+        .task(id: node.revision) { prepare() }
         .onChange(of: windowSeconds) { _, _ in prepare() }
         .onChange(of: showsFiltered) { _, _ in prepare() }
         .onChange(of: frozen == nil) { _, _ in prepare() }
@@ -183,7 +208,7 @@ struct MonitorScreen: View {
                 ConnectionBadge(state: env.connectionState, showsLabel: false)
             }
 
-            WaveformChart(channels: channels, height: 210, unitLabel: "m/s²")
+            WaveformChart(channels: channels, fixedScale: displayScale, height: 210, unitLabel: "m/s²")
 
             if let ratio = node.snapshot?.ratio, ratio.count > 8 {
                 TriggerRatioStrip(ratio: ratio, threshold: 4.0)
@@ -267,7 +292,7 @@ struct MonitorScreen: View {
         VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
             SectionLabel("Live values")
 
-            let peaks = GroundMotion.peaks(visible)
+            let peaks = peaks ?? PeakValues(pga: 0, pgv: 0, pgd: 0, pgaTime: 0)
             ReadoutGrid(readouts: [
                 Readout(label: "Peak acceleration",
                         value: String(format: "%.4f", peaks.pga / gravity), unit: "g",

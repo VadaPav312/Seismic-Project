@@ -100,15 +100,33 @@ public struct ShearBuilding: Sendable, Equatable {
         // load and are built lighter. A linear taper to 60% at the roof is a
         // standard, defensible assumption, and it produces realistic mode
         // shapes rather than the unnaturally straight ones a uniform model gives.
+        // The massing profile, sampled per storey. A uniform building gives all
+        // ones and this changes nothing; a podium or a taper changes both the
+        // mass and the stiffness of the storeys it affects.
+        let planScales = building.massing.scales(storeys: n)
+
         var storeys: [Storey] = []
         for i in 0..<n {
             let fraction = n > 1 ? Double(i) / Double(n - 1) : 0
             let taper = 1.0 - 0.4 * fraction
+
+            // Floor area goes with the square of a linear plan scale, so a
+            // tower at half the plan width has a quarter of the floor — and a
+            // quarter of the mass. Getting this wrong on a tower-on-podium
+            // misplaces a large fraction of the building's weight.
+            let planScale = i < planScales.count ? planScales[i] : 1
+            let storeyArea = floorArea * planScale * planScale
+
+            // Lateral stiffness scales roughly with the plan area available for
+            // columns and walls. Linear in area is the defensible assumption
+            // here: the alternative, holding stiffness constant while mass
+            // drops, would make a slender tower stiffer than the podium
+            // carrying it, which is the opposite of what happens.
             storeys.append(Storey(id: i + 1,
                                   height: storeyHeight,
-                                  mass: massPerFloor,
-                                  stiffness: provisional * taper,
-                                  floorArea: floorArea))
+                                  mass: massPerFloor * planScale * planScale,
+                                  stiffness: provisional * taper * planScale * planScale,
+                                  floorArea: storeyArea))
         }
 
         // A soft ground storey — an open lobby or undercroft parking — is one of

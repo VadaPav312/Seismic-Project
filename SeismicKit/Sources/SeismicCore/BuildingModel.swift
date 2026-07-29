@@ -245,6 +245,14 @@ public struct BuildingModel: Identifiable, Codable, Sendable, Equatable {
     public var height: Double                 // metres, above grade
     public var footprintArea: Double          // m²
     public var footprint: [Coordinate2D]      // local metres, closed polygon, for extrusion
+
+    /// How the plan changes with height: podium, setback, taper, or uniform.
+    ///
+    /// Not decoration. The modal analysis integrates mass up the height, and a
+    /// podium puts a large fraction of a building's mass in its bottom few
+    /// storeys — the case where a uniform prism gets the period wrong rather
+    /// than merely looking wrong.
+    public var massing: Massing = .uniform
     public var yearBuilt: Int?
     public var material: ConstructionMaterial
     public var system: StructuralSystem
@@ -297,6 +305,7 @@ public struct BuildingModel: Identifiable, Codable, Sendable, Equatable {
         height: Double,
         footprintArea: Double = 400,
         footprint: [Coordinate2D] = [],
+        massing: Massing = .uniform,
         yearBuilt: Int? = nil,
         material: ConstructionMaterial = .reinforcedConcrete,
         system: StructuralSystem = .momentFrame,
@@ -324,6 +333,7 @@ public struct BuildingModel: Identifiable, Codable, Sendable, Equatable {
         self.footprintArea = Swift.max(footprintArea, 10)
         self.footprint = footprint.isEmpty
             ? Self.rectangularFootprint(area: Swift.max(footprintArea, 10)) : footprint
+        self.massing = massing
         self.yearBuilt = yearBuilt
         self.material = material
         self.system = system

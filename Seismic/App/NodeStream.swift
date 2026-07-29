@@ -50,7 +50,21 @@ final class NodeStream: ObservableObject {
 
     var isStreaming: Bool { (snapshot?.recent.count ?? 0) > 0 }
 
+    /// Ticks received but not published, so the interface updates at half the
+    /// rate the physics runs at.
+    private var pending = 0
+
     func update(_ snapshot: NodeSession.Snapshot) {
+        // The node is integrated at 20 Hz because the physics needs it. The
+        // interface does not: publishing at that rate means every observing
+        // view re-renders twenty times a second, and each of those redraws a
+        // Canvas that rescans the whole window. Ten updates a second is still
+        // visually continuous — a seismograph trace cannot meaningfully change
+        // faster than the eye resolves — and halves everything downstream.
+        pending += 1
+        guard pending >= 2 else { return }
+        pending = 0
+
         self.snapshot = snapshot
         revision &+= 1
     }

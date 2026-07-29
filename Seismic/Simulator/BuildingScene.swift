@@ -160,9 +160,17 @@ final class BuildingSceneController: ObservableObject {
         let width = max(extents.width, 4)
         let depth = max(extents.depth, 4)
 
+        // The massing profile, so a podium is wider than the tower on it and a
+        // tapered building actually tapers. A uniform building gives all ones
+        // and this changes nothing.
+        let planScales = building.massing.scales(storeys: solved.degreesOfFreedom)
+
         for index in 0..<solved.degreesOfFreedom {
             let height = solved.storeys[index].height
-            let node = makeStorey(index: index, width: width, depth: depth, height: height)
+            let scale = index < planScales.count ? planScales[index] : 1
+            let node = makeStorey(index: index, width: width * scale,
+                                  depth: depth * scale, height: height,
+                                  planScale: scale)
 
             // Position by the cumulative height of the storeys below, so a
             // base-isolation layer of 0.6 m does not push the whole tower up by
@@ -197,18 +205,18 @@ final class BuildingSceneController: ObservableObject {
     func resetCamera() { frameCamera() }
 
     private func makeStorey(index: Int, width: Double, depth: Double,
-                            height: Double) -> SCNNode {
+                            height: Double, planScale: Double = 1) -> SCNNode {
         // A slab plus a slightly inset body reads as a floor plate and a storey,
         // which is enough to make the massing legible without modelling columns.
         let container = SCNNode()
 
         let bodyNode = storeyNode(height: height * 0.86, inset: 0,
-                                  width: width, depth: depth)
+                                  width: width, depth: depth, planScale: planScale)
         bodyNode.name = "body"
         container.addChildNode(bodyNode)
 
         let slabNode = storeyNode(height: height * 0.10, inset: -0.04,
-                                  width: width, depth: depth)
+                                  width: width, depth: depth, planScale: planScale)
         slabNode.name = "slab"
         slabNode.position = SCNVector3(0, Float(height * 0.46), 0)
         container.addChildNode(slabNode)
@@ -233,8 +241,8 @@ final class BuildingSceneController: ObservableObject {
     /// user can recognise as their own building is the thing that makes the
     /// rest of the model believable.
     private func storeyNode(height: Double, inset: Double,
-                            width: Double, depth: Double) -> SCNNode {
-        let scale = 1 - inset
+                            width: Double, depth: Double, planScale: Double = 1) -> SCNNode {
+        let scale = (1 - inset) * planScale
         let thickness = max(height, 0.01)
 
         if let path = footprintPath(scale: scale) {
