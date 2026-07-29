@@ -758,3 +758,160 @@ struct GlossaryTerm: View {
     .seismicBackground()
     .preferredColorScheme(.dark)
 }
+
+// MARK: - Settings
+
+/// A settings group: a header, a glass panel of rows, and an explanatory footer.
+///
+/// This exists because `List` cannot be made to look like the rest of this app.
+/// Its row backgrounds, insets and separators are drawn by UIKit beneath the
+/// SwiftUI layer, and the parts that can be overridden leave the ones that
+/// cannot looking wrong — which is how Settings ended up as the one screen that
+/// looked like a different application.
+///
+/// What a list gives away by not using one is real: swipe actions, free
+/// accessibility rows, and automatic Dynamic Type row heights. So those are
+/// rebuilt rather than dropped — every row here is a real control with a
+/// minimum tap target, and the group is a single accessibility container.
+struct SettingsGroup<Content: View>: View {
+    var header: String?
+    var footer: String?
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.s2) {
+            if let header {
+                Text(header.uppercased())
+                    .font(Theme.Typography.label)
+                    .tracking(1.2)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .padding(.horizontal, Theme.Metrics.s1)
+            }
+
+            VStack(spacing: 0) { content }
+                .instrumentPanel(padding: 0, cornerRadius: Theme.Metrics.cornerRadius)
+
+            if let footer {
+                Text(footer)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, Theme.Metrics.s1)
+                    .padding(.top, 2)
+            }
+        }
+    }
+}
+
+/// One row inside a `SettingsGroup`.
+///
+/// The divider is drawn by the row rather than between rows, inset to start
+/// past the icon, which is the detail that makes a stack of rows read as a
+/// grouped list rather than as separate strips.
+struct SettingsRow<Trailing: View>: View {
+    let title: String
+    var detail: String?
+    var systemImage: String?
+    var tint: Color = Theme.Palette.accent
+    var showsDivider = true
+    var action: (() -> Void)?
+    @ViewBuilder var trailing: Trailing
+
+    var body: some View {
+        Group {
+            if let action {
+                Button {
+                    Haptics.shared.play(.selection)
+                    action()
+                } label: { rowBody }
+                .buttonStyle(SettingsRowButtonStyle())
+            } else {
+                rowBody
+            }
+        }
+    }
+
+    private var rowBody: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: Theme.Metrics.s3) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 17))
+                        .foregroundStyle(tint)
+                        .frame(width: 26)
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(Theme.Typography.body)
+                        .foregroundStyle(Theme.Palette.textPrimary)
+                        .multilineTextAlignment(.leading)
+                    if let detail {
+                        Text(detail)
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .multilineTextAlignment(.leading)
+                    }
+                }
+
+                Spacer(minLength: Theme.Metrics.s2)
+                trailing
+            }
+            .padding(.horizontal, Theme.Metrics.s4)
+            .padding(.vertical, Theme.Metrics.s3)
+            .frame(minHeight: Theme.Metrics.minimumTapTarget)
+
+            if showsDivider {
+                Rectangle()
+                    .fill(Theme.Palette.hairline)
+                    .frame(height: 1)
+                    // Inset past the icon, so the divider separates the text
+                    // columns rather than cutting the whole row in half.
+                    .padding(.leading, systemImage == nil ? Theme.Metrics.s4 : 55)
+            }
+        }
+        .contentShape(Rectangle())
+    }
+}
+
+extension SettingsRow where Trailing == EmptyView {
+    /// Labelled `title:` to match the memberwise initialiser. Two spellings of
+    /// the same parameter is exactly the kind of small inconsistency that makes
+    /// a component annoying to use.
+    init(title: String, detail: String? = nil, systemImage: String? = nil,
+         tint: Color = Theme.Palette.accent, showsDivider: Bool = true,
+         action: (() -> Void)? = nil) {
+        self.init(title: title, detail: detail, systemImage: systemImage, tint: tint,
+                  showsDivider: showsDivider, action: action) { EmptyView() }
+    }
+}
+
+/// Highlights the whole row on press, the way a list row does.
+private struct SettingsRowButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(configuration.isPressed
+                        ? Theme.Palette.glassStrong : Color.clear)
+            .animation(Theme.Motion.quick, value: configuration.isPressed)
+    }
+}
+
+/// The chevron that says a row leads somewhere.
+struct SettingsChevron: View {
+    var body: some View {
+        Image(systemName: "chevron.right")
+            .font(.system(size: 13, weight: .semibold))
+            .foregroundStyle(Theme.Palette.textGhost)
+    }
+}
+
+/// A read-only value on the right of a row.
+struct SettingsValue: View {
+    let text: String
+    var body: some View {
+        Text(text)
+            .font(Theme.Typography.numericSmall)
+            .foregroundStyle(Theme.Palette.textSecondary)
+    }
+}

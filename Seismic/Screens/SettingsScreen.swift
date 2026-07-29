@@ -14,177 +14,18 @@ struct SettingsScreen: View {
     @State private var showingGlossary = false
 
     var body: some View {
-        List {
-            Section("Account") {
-                NavigationLink { HouseholdScreen().seismicBackground() } label: {
-                    Label {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(services.account?.displayName ?? "Not signed in")
-                            Text(services.household.map { "\($0.members.count) in \($0.name)" }
-                                 ?? "Sign in to back up and share, or carry on without")
-                                .font(Theme.Typography.caption)
-                                .foregroundStyle(Theme.Palette.textTertiary)
-                        }
-                    } icon: {
-                        Image(systemName: services.account?.provider.systemImage
-                              ?? "person.crop.circle")
-                    }
-                }
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.Metrics.s6) {
+                accountGroup
+                referenceGroup
+                dataGroup
+                behaviourGroup
+                notificationsGroup
+                demonstrationGroup
+                aboutGroup
             }
-
-            Section {
-                NavigationLink { APIKeysScreen().seismicBackground() } label: {
-                    Label {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("API keys")
-                            Text("\(env.configuredKeyCount) of "
-                                 + "\(SecretKey.allCases.filter(\.isSensitive).count) configured")
-                                .font(Theme.Typography.caption)
-                                .foregroundStyle(Theme.Palette.textTertiary)
-                        }
-                    } icon: {
-                        Image(systemName: "key")
-                    }
-                }
-
-                NavigationLink { LedgerScreen().seismicBackground() } label: {
-                    Label("Ledger verification", systemImage: "checkmark.seal")
-                }
-
-                NavigationLink { GlossaryScreen().seismicBackground() } label: {
-                    Label("Glossary", systemImage: "character.book.closed")
-                }
-
-                NavigationLink { AlgorithmCatalogScreen().seismicBackground() } label: {
-                    Label("Algorithm catalogue", systemImage: "function")
-                }
-            } header: {
-                Text("Reference")
-            } footer: {
-                if env.secretsLoadedFromEnv > 0 {
-                    Text("\(env.secretsLoadedFromEnv) keys were loaded from your .env file at "
-                         + "first launch and moved into the keychain.")
-                } else {
-                    Text("No .env file was found, which is fine — every feature works without "
-                         + "keys, using bundled data and on-device computation.")
-                }
-            }
-
-            Section("Data") {
-                let footprint = env.store.storageFootprint()
-                LabeledContent("Buildings", value: "\(env.buildings.count)")
-                LabeledContent("Events", value: "\(env.events.count)")
-                LabeledContent("Measurements", value: "\(env.observations.count)")
-                LabeledContent("Storage",
-                               value: ByteCountFormatter.string(
-                                fromByteCount: Int64(footprint.documents + footprint.recordings),
-                                countStyle: .file))
-
-                Button {
-                    if let data = env.store.exportJSON() {
-                        exportedData = data
-                        showingExport = true
-                    }
-                } label: {
-                    Label("Export everything", systemImage: "square.and.arrow.up")
-                }
-
-                Button(role: .destructive) {
-                    showingDeleteConfirmation = true
-                } label: {
-                    Label("Delete all data", systemImage: "trash")
-                }
-
-                // Offered whenever the app has been emptied, so deleting
-                // everything is a reversible decision about *your* data rather
-                // than a way to end up with an app that does nothing.
-                if env.buildings.isEmpty {
-                    Button {
-                        env.restoreSeedLibrary()
-                    } label: {
-                        Label("Restore the example library", systemImage: "arrow.clockwise")
-                    }
-                }
-            }
-
-            Section {
-                Toggle(isOn: $hapticsEnabled) {
-                    Label("Haptics", systemImage: "iphone.radiowaves.left.and.right")
-                }
-
-                Toggle(isOn: $voice.speaksAutomatically) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Label("Spoken guidance", systemImage: "speaker.wave.2")
-                        Text("Instructions are read aloud so you do not have to look at the "
-                             + "screen while getting under a table. The earthquake warning "
-                             + "itself is spoken either way.")
-                            .font(Theme.Typography.caption)
-                            .foregroundStyle(Theme.Palette.textTertiary)
-                    }
-                }
-
-                Toggle(isOn: $voice.isVoiceControlEnabled) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Label("Voice control", systemImage: "mic")
-                        Text(voice.isSpeechRecognitionAvailable
-                             ? "Ask \"is it safe\" or \"read the assessment\" without touching "
-                               + "the phone. Anything that fires an actuator still needs a tap."
-                             : "Speech recognition is not available on this device.")
-                            .font(Theme.Typography.caption)
-                            .foregroundStyle(Theme.Palette.textTertiary)
-                    }
-                }
-                .disabled(!voice.isSpeechRecognitionAvailable)
-
-                LabeledContent("Voice") {
-                    Text(voice.voiceProvider)
-                        .font(Theme.Typography.numericSmall)
-                        .foregroundStyle(Theme.Palette.textTertiary)
-                }
-            } header: {
-                Text("Accessibility and behaviour")
-            } footer: {
-                if let error = voice.listeningError {
-                    Text(error)
-                }
-            }
-
-            Section {
-                NotificationSettingsSection(centre: notifications)
-                    .listRowInsets(EdgeInsets())
-                    .listRowBackground(Color.clear)
-            }
-
-            Section {
-                Button {
-                    env.didCompleteOnboarding = false
-                } label: {
-                    Label("Replay the introduction", systemImage: "arrow.counterclockwise")
-                }
-                Button {
-                    // Clearing the flag is enough: RootView starts the tour
-                    // whenever it is unset and the main interface is showing.
-                    tutorial.requestReplay()
-                } label: {
-                    Label("Take the guided tour again", systemImage: "hand.point.up.left")
-                }
-                Toggle(isOn: $env.isPresentationMode) {
-                    Label("Presentation mode", systemImage: "play.rectangle")
-                }
-            } header: {
-                Text("Demonstration")
-            } footer: {
-                Text("Presentation mode walks through the app's highlights automatically, for "
-                     + "showing it to somebody.")
-            }
-
-            Section {
-                LabeledContent("Version", value: "1.0")
-                LabeledContent("Algorithms", value: "\(AlgorithmCatalog.countedAlgorithms) core, "
-                               + "\(AlgorithmCatalog.all.count - AlgorithmCatalog.countedAlgorithms) supporting")
-            } footer: {
-                Text(Assessment.disclaimer)
-            }
+            .padding(Theme.Metrics.screenPadding)
+            .contentColumn()
         }
         .scrollContentBackground(.hidden)
         .seismicBackground()
@@ -215,6 +56,173 @@ struct SettingsScreen: View {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    // MARK: Groups
+
+    private var accountGroup: some View {
+        SettingsGroup(header: "Account") {
+            NavigationLink { HouseholdScreen().seismicBackground() } label: {
+                SettingsRow(
+                    title: services.account?.displayName ?? "Not signed in",
+                    detail: services.household.map { "\($0.members.count) in \($0.name)" }
+                        ?? "Sign in to back up and share, or carry on without",
+                    systemImage: services.account?.provider.systemImage ?? "person.crop.circle",
+                    showsDivider: false
+                ) { SettingsChevron() }
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var referenceGroup: some View {
+        SettingsGroup(
+            header: "Reference",
+            footer: env.secretsLoadedFromEnv > 0
+                ? "\(env.secretsLoadedFromEnv) keys were loaded from your .env file at first "
+                  + "launch and moved into the keychain."
+                : "No .env file was found, which is fine — every feature works without keys, "
+                  + "using bundled data and on-device computation."
+        ) {
+            NavigationLink { APIKeysScreen().seismicBackground() } label: {
+                SettingsRow(
+                    title: "API keys",
+                    detail: "\(env.configuredKeyCount) of "
+                        + "\(SecretKey.allCases.filter(\.isSensitive).count) configured",
+                    systemImage: "key"
+                ) { SettingsChevron() }
+            }
+            .buttonStyle(.plain)
+
+            NavigationLink { LedgerScreen().seismicBackground() } label: {
+                SettingsRow(title: "Ledger verification", systemImage: "checkmark.seal") {
+                    SettingsChevron()
+                }
+            }
+            .buttonStyle(.plain)
+
+            NavigationLink { GlossaryScreen().seismicBackground() } label: {
+                SettingsRow(title: "Glossary", systemImage: "character.book.closed") {
+                    SettingsChevron()
+                }
+            }
+            .buttonStyle(.plain)
+
+            NavigationLink { AlgorithmCatalogScreen().seismicBackground() } label: {
+                SettingsRow(title: "Algorithm catalogue", systemImage: "function",
+                            showsDivider: false) { SettingsChevron() }
+            }
+            .buttonStyle(.plain)
+        }
+    }
+
+    private var dataGroup: some View {
+        let footprint = env.store.storageFootprint()
+        return SettingsGroup(header: "Data") {
+            SettingsRow(title: "Buildings") { SettingsValue(text: "\(env.buildings.count)") }
+            SettingsRow(title: "Events") { SettingsValue(text: "\(env.events.count)") }
+            SettingsRow(title: "Measurements") {
+                SettingsValue(text: "\(env.observations.count)")
+            }
+            SettingsRow(title: "Storage") {
+                SettingsValue(text: ByteCountFormatter.string(
+                    fromByteCount: Int64(footprint.documents + footprint.recordings),
+                    countStyle: .file))
+            }
+
+            SettingsRow(title: "Export everything", systemImage: "square.and.arrow.up",
+                        action: {
+                if let data = env.store.exportJSON() {
+                    exportedData = data
+                    showingExport = true
+                }
+            })
+
+            SettingsRow(title: "Delete all data", systemImage: "trash",
+                        tint: Theme.Palette.verdictRed,
+                        showsDivider: !env.buildings.isEmpty,
+                        action: { showingDeleteConfirmation = true })
+
+            // Offered whenever the app has been emptied, so deleting everything
+            // is a reversible decision about *your* data rather than a way to
+            // end up with an app that does nothing.
+            if env.buildings.isEmpty {
+                SettingsRow(title: "Restore the example library",
+                            systemImage: "arrow.clockwise", showsDivider: false,
+                            action: { env.restoreSeedLibrary() })
+            }
+        }
+    }
+
+    private var behaviourGroup: some View {
+        SettingsGroup(header: "Accessibility and behaviour",
+                      footer: voice.listeningError) {
+            SettingsRow(title: "Haptics",
+                        systemImage: "iphone.radiowaves.left.and.right") {
+                Toggle("", isOn: $hapticsEnabled).labelsHidden()
+            }
+
+            SettingsRow(title: "Spoken guidance",
+                        detail: "Instructions are read aloud so you do not have to look at the "
+                            + "screen while getting under a table. The earthquake warning itself "
+                            + "is spoken either way.",
+                        systemImage: "speaker.wave.2") {
+                Toggle("", isOn: $voice.speaksAutomatically).labelsHidden()
+            }
+
+            SettingsRow(title: "Voice control",
+                        detail: voice.isSpeechRecognitionAvailable
+                            ? "Ask \"is it safe\" or \"read the assessment\" without touching the "
+                              + "phone. Anything that fires an actuator still needs a tap."
+                            : "Speech recognition is not available on this device.",
+                        systemImage: "mic") {
+                Toggle("", isOn: $voice.isVoiceControlEnabled)
+                    .labelsHidden()
+                    .disabled(!voice.isSpeechRecognitionAvailable)
+            }
+
+            SettingsRow(title: "Voice", showsDivider: false) {
+                SettingsValue(text: voice.voiceProvider)
+            }
+        }
+    }
+
+    private var notificationsGroup: some View {
+        SettingsGroup {
+            NotificationSettingsSection(centre: notifications)
+                .padding(Theme.Metrics.s4)
+        }
+    }
+
+    private var demonstrationGroup: some View {
+        SettingsGroup(
+            header: "Demonstration",
+            footer: "Presentation mode walks through the app's highlights automatically, for "
+                + "showing it to somebody."
+        ) {
+            SettingsRow(title: "Replay the introduction",
+                        systemImage: "arrow.counterclockwise",
+                        action: { env.didCompleteOnboarding = false })
+            // Clearing the flag is enough: RootView starts the tour whenever
+            // it is unset and the main interface is showing.
+            SettingsRow(title: "Take the guided tour again",
+                        systemImage: "hand.point.up.left",
+                        action: { tutorial.requestReplay() })
+            SettingsRow(title: "Presentation mode", systemImage: "play.rectangle",
+                        showsDivider: false) {
+                Toggle("", isOn: $env.isPresentationMode).labelsHidden()
+            }
+        }
+    }
+
+    private var aboutGroup: some View {
+        SettingsGroup(footer: Assessment.disclaimer) {
+            SettingsRow(title: "Version") { SettingsValue(text: "1.0") }
+            SettingsRow(title: "Algorithms", showsDivider: false) {
+                SettingsValue(text: "\(AlgorithmCatalog.countedAlgorithms) core, "
+                    + "\(AlgorithmCatalog.all.count - AlgorithmCatalog.countedAlgorithms) supporting")
             }
         }
     }
