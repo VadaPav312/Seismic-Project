@@ -157,6 +157,7 @@ struct BuildingDesignerScreen: View {
                 planSection
                 massingSection
                 constructionSection
+                plainReading
                 verdictOnTheDesign
                 saveButton
             }
@@ -465,6 +466,18 @@ struct BuildingDesignerScreen: View {
     }
 
     /// What the design implies, said plainly.
+    /// The design read back in ordinary words, live.
+    ///
+    /// This is where the screen earns its keep. Dragging the soil from rock to
+    /// soft clay does not change a single number in the readouts above — the
+    /// building is the same building — and yet the reading below can go from
+    /// unremarkable to a serious warning, because the ground it stands on now
+    /// shakes at the rate it sways. That is the least intuitive thing in
+    /// earthquake engineering and it is very hard to learn from a table.
+    private var plainReading: some View {
+        PlainReadingCard(reading: PlainReading.of(building, tower: tower))
+    }
+
     private var verdictOnTheDesign: some View {
         let concerns = designConcerns
         return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {

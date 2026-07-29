@@ -145,6 +145,13 @@ struct BuildingDetailSheet: View {
                         .clipShape(RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadius,
                                                     style: .continuous))
 
+                    // Before the facts and the derived numbers, not after them.
+                    // Somebody opening a building wants to know what it means
+                    // for them; the evidence for that answer is still below, in
+                    // full, for anyone who wants to check it.
+                    PlainReadingCard(reading: PlainReading.of(
+                        building, tower: TowerAnalysis.analyse(building)))
+
                     if !building.notes.isEmpty {
                         Text(building.notes)
                             .font(Theme.Typography.body)
