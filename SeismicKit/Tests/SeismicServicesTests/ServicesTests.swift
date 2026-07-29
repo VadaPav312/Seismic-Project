@@ -782,3 +782,55 @@ final class FreeTierTests: XCTestCase {
         XCTAssertFalse(SecretKey.freeKeys.isEmpty)
     }
 }
+
+// MARK: - Massing inference
+
+/// Reading a building's form out of prose, and refusing to guess.
+///
+/// The failure that matters here is a confident wrong answer: a taper invented
+/// from a sentence that did not say one changes the mass distribution and
+/// therefore the period, and it does it silently.
+final class MassingInferenceTests: XCTestCase {
+
+    func testItReadsTheFormOutOfOrdinaryDescriptions() {
+        let cases: [(String, String)] = [
+            ("a slim tower rising from a five-storey podium", "podium"),
+            ("the stepped setback silhouette of the 1930s", "setback"),
+            ("its tapering form was designed for seismic performance", "tapered"),
+            ("a pyramid of glass and steel", "tapered"),
+            ("built on a granite plinth", "podium"),
+            ("a wedding cake of receding terraces", "setback"),
+        ]
+        for (text, expected) in cases {
+            let resolved = BuildingSearchService.massingFromText(text)
+            XCTAssertEqual(resolved?.style, expected, "\(text.debugDescription)")
+        }
+    }
+
+    /// Prose that does not describe a form must produce nothing, not a default.
+    func testItReturnsNothingRatherThanGuessing() {
+        for text in ["", "a well-known office building", "brutalist concrete",
+                     "the tallest building in the city", "designed by a famous architect"] {
+            XCTAssertNil(BuildingSearchService.massingFromText(text),
+                         "\(text.debugDescription) should not imply a form")
+        }
+    }
+
+    /// The named forms have to be moderate. These are inferences from a
+    /// sentence, not measurements, and an exaggerated taper misstates the mass
+    /// distribution more than a plain prism would.
+    func testInferredFormsAreConservative() {
+        for name in ["tapered", "setback", "podium"] {
+            guard let resolved = BuildingSearchService.massingNamed(name) else {
+                return XCTFail("\(name) should resolve")
+            }
+            let top = resolved.massing.stations.last?.scale ?? 1
+            XCTAssertGreaterThanOrEqual(top, 0.35,
+                                        "\(name) narrows too aggressively for an inference")
+            XCTAssertFalse(resolved.massing.isUniform, "\(name) should change with height")
+        }
+        XCTAssertTrue(BuildingSearchService.massingNamed("uniform")?.massing.isUniform ?? false)
+        XCTAssertNil(BuildingSearchService.massingNamed("unknown"))
+        XCTAssertNil(BuildingSearchService.massingNamed(""))
+    }
+}

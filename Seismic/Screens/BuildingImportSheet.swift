@@ -375,6 +375,7 @@ final class BuildingImporter: ObservableObject {
         case "footprintArea": "Footprint area"
         case "footprint": "Footprint outline"
         case "planShape": "Plan shape"
+        case "massing", "massingStyle": "Form"
         case "material": "Material"
         case "system": "Structural system"
         case "architect": "Architect"
@@ -396,9 +397,20 @@ final class BuildingImporter: ObservableObject {
     }
 
     private func geometryNarration(_ building: BuildingModel) -> String {
-        "Footprint of about \(Int(building.footprintArea)) m² from the mapped outline. "
-            + "No photorealistic tile coverage, so the massing is generated parametrically "
-            + "from the facts."
+        var parts = ["Footprint of about \(Int(building.footprintArea)) m² "
+                     + "from the mapped outline."]
+
+        // Say what the form is and where it came from. An inferred taper that
+        // silently appears in the model is a claim the app has not owned.
+        if !building.massing.isUniform {
+            parts.append(building.massing.summary)
+        } else {
+            parts.append("Uniform plan from base to roof.")
+        }
+
+        parts.append("No photorealistic tile coverage, so the massing is generated "
+                     + "parametrically from the facts rather than measured.")
+        return parts.joined(separator: " ")
     }
 
     private func structuralNarration(_ building: BuildingModel) -> String {

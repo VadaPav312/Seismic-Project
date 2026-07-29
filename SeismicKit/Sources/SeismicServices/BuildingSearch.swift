@@ -710,6 +710,114 @@ public actor BuildingSearchService {
         self.analyst = AIAnalyst(vault: vault, transport: transport)
     }
 
+    /// The building's three-dimensional form, as the sources describe it.
+    ///
+    /// Plan shape says what it looks like from above; this says what it does as
+    /// it rises. Together they are the difference between a recognisable
+    /// building and an extruded brick — and, because massing drives the mass
+    /// distribution the modal analysis integrates, between a plausible period
+    /// and a wrong one.
+    struct ResolvedMassing: Sendable {
+        var massing: Massing
+        var style: String
+        var reason: String
+        var confidence: Double
+    }
+
+    /// Reads the massing out of the source text, then asks the model if the
+    /// text is silent.
+    ///
+    /// Text first, and not only to save a request: when a description already
+    /// says "tapering" or "on a podium", reading that word is both free and
+    /// more trustworthy than asking a model to recall a specific building. The
+    /// model is consulted only when the prose says nothing, and its answer is
+    /// recorded as an inference so the import screen shows it as one.
+    private func massing(for candidate: BuildingCandidate,
+                         facts: BuildingFactSet,
+                         storeys: Int) async -> ResolvedMassing? {
+        let described = [candidate.snippet, candidate.subtitle,
+                         facts.facts["notes"]?.value ?? ""]
+            .joined(separator: " ")
+            .lowercased()
+
+        // Only for buildings tall enough for massing to mean anything. A
+        // three-storey block does not have a podium.
+        guard storeys >= 6 else { return nil }
+
+        if let described = Self.massingFromText(described) {
+            return described
+        }
+
+        guard await analyst.hasAnyProvider else { return nil }
+
+        let request = AnalystRequest(
+            task: .buildingSummary,
+            subject: candidate.name,
+            facts: [
+                AnalystFact(label: "Building", value: candidate.name),
+                AnalystFact(label: "Location", value: candidate.subtitle),
+                AnalystFact(label: "Storeys", value: String(storeys)),
+                AnalystFact(label: "What the sources say",
+                            value: String(candidate.snippet.prefix(400))),
+            ],
+            question: "Seen from the side, does this building keep the same width all the way "
+                    + "up, narrow continuously, step inwards at intervals, or sit as a slim "
+                    + "tower on a wider base? Answer with exactly one word and nothing else: "
+                    + "uniform, tapered, setback, or podium. If you do not know this specific "
+                    + "building, answer: unknown.")
+
+        let answer = await analyst.answer(request)
+        guard answer.value.isAIGenerated else { return nil }
+
+        // Only the first word is read. A model that decides to explain itself
+        // must not be able to turn "uniform, although the crown tapers" into a
+        // tapered building.
+        let first = answer.value.text
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+            .split(whereSeparator: { !$0.isLetter })
+            .first.map(String.init) ?? ""
+
+        guard let resolved = Self.massingNamed(first) else { return nil }
+        return ResolvedMassing(
+            massing: resolved.massing,
+            style: resolved.style,
+            reason: "Inferred by \(answer.provider) from what the sources say",
+            confidence: 0.45)
+    }
+
+    /// Matches the words buildings are actually described with.
+    static func massingFromText(_ text: String) -> ResolvedMassing? {
+        let patterns: [(needles: [String], style: String)] = [
+            (["podium", "on a base", "tower rises from", "plinth"], "podium"),
+            (["setback", "set-back", "stepped", "ziggurat", "wedding cake"], "setback"),
+            (["taper", "tapering", "pyramid", "narrows towards", "conical", "spire-like"],
+             "tapered"),
+        ]
+        for (needles, style) in patterns where needles.contains(where: text.contains) {
+            guard let resolved = massingNamed(style) else { continue }
+            return ResolvedMassing(massing: resolved.massing, style: style,
+                                   reason: "Described as \(style) in the source text",
+                                   confidence: 0.7)
+        }
+        return nil
+    }
+
+    /// Sensible defaults for each named form.
+    ///
+    /// Deliberately moderate. These are inferences from prose, not measurements,
+    /// and an exaggerated taper would produce a striking model that misstates
+    /// the mass distribution more than a plain prism would.
+    static func massingNamed(_ name: String) -> (massing: Massing, style: String)? {
+        switch name {
+        case "uniform": (Massing.uniform, "uniform")
+        case "tapered": (Massing.tapered(topScale: 0.42), "tapered")
+        case "setback": (Massing.setback(steps: 3, topScale: 0.55), "setback")
+        case "podium": (Massing.podium(podiumFraction: 0.22, towerScale: 0.55), "podium")
+        default: nil
+        }
+    }
+
     /// What the plan looks like from above, when nobody has traced it.
     struct ResolvedPlan: Sendable {
         var shape: PlanShape
@@ -879,6 +987,27 @@ public actor BuildingSearchService {
             providers.append(shape.source == .aiInference ? "AI plan shape" : "Described plan")
         }
 
+        // How the form changes with height. Needs the storey count, so it runs
+        // after the other sources have had their say.
+        let storeys = Int(merged.facts["storeyCount"]?.value ?? "") ?? 0
+        if let form = await massing(for: candidate, facts: merged, storeys: storeys),
+           let encoded = try? JSONEncoder().encode(form.massing),
+           let json = String(data: encoded, encoding: .utf8) {
+            merged.facts["massing"] = RetrievedFact(
+                field: "massing", value: json,
+                provenance: FactProvenance(
+                    source: form.confidence > 0.6 ? .webSearch : .aiInference,
+                    confidence: form.confidence,
+                    detail: form.reason, retrievedAt: Date()))
+            merged.facts["massingStyle"] = RetrievedFact(
+                field: "massingStyle", value: form.style,
+                provenance: FactProvenance(
+                    source: form.confidence > 0.6 ? .webSearch : .aiInference,
+                    confidence: form.confidence,
+                    detail: form.reason, retrievedAt: Date()))
+            providers.append("Massing")
+        }
+
         if !candidate.snippet.isEmpty {
             let extracted = SnippetExtractor.facts(from: candidate.snippet)
             if !extracted.isEmpty {
@@ -929,6 +1058,14 @@ public actor BuildingSearchService {
             return (try? JSONDecoder().decode([Coordinate2D].self, from: data)) ?? []
         }()
 
+        // The massing, if anything worked one out.
+        let massing: Massing = {
+            guard let raw = string("massing"), let data = raw.data(using: .utf8),
+                  let decoded = try? JSONDecoder().decode(Massing.self, from: data)
+            else { return .uniform }
+            return decoded
+        }()
+
         // A traced outline wins outright. Failing that, the plan shape becomes
         // a real polygon rather than the rectangle every building used to get.
         let plannedArea = number("footprintArea") ?? (Double(resolvedStoreys) * 40 + 300)
@@ -950,6 +1087,7 @@ public actor BuildingSearchService {
             footprintArea: number("footprintArea")
                 ?? (mapped.isEmpty ? plannedArea : OverpassClient.polygonArea(mapped)),
             footprint: footprint,
+            massing: massing,
             yearBuilt: number("yearBuilt").map(Int.init),
             material: string("material").flatMap(Self.material) ?? .reinforcedConcrete,
             system: string("system").flatMap(StructuralSystem.init(rawValue:)) ?? .momentFrame,

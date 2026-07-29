@@ -8,6 +8,7 @@ struct LibraryScreen: View {
     @EnvironmentObject private var env: AppEnvironment
     @State private var query = ""
     @State private var showingImport = false
+    @State private var showingDesigner = false
     @State private var detail: BuildingModel?
 
     private var filtered: [BuildingModel] {
@@ -31,7 +32,9 @@ struct LibraryScreen: View {
                             + "different term, or search the web for any building in the world "
                             + "and pull it in.",
                         actionTitle: "Search the web instead",
-                        action: { showingImport = true })
+                        action: { showingImport = true },
+                        secondaryActionTitle: "Design one from scratch",
+                        secondaryAction: { showingDesigner = true })
                         .frame(minHeight: 320)
                 } else {
                     ForEach(filtered) { building in
@@ -50,14 +53,46 @@ struct LibraryScreen: View {
         }
         .searchable(text: $query, prompt: "Search your library")
         .toolbar {
+            // Two ways to get a building, because they are genuinely different
+            // acts: import claims to know a real one, designing claims nothing
+            // except what you entered.
             ToolbarItem(placement: .topBarTrailing) {
-                Button { showingImport = true } label: {
+                Menu {
+                    Button {
+                        showingImport = true
+                    } label: {
+                        Label("Import a real building", systemImage: "globe")
+                    }
+                    Button {
+                        showingDesigner = true
+                    } label: {
+                        Label("Design one from scratch", systemImage: "square.on.square.dashed")
+                    }
+                } label: {
                     Image(systemName: "plus")
                 }
-                .accessibilityLabel("Import a building")
+                .accessibilityLabel("Add a building")
+            }
+        }
+        .task {
+            // A screenshot run or a UI test can open the designer directly, in
+            // the same spirit as SEISMIC_INITIAL_TAB. It grants nothing that
+            // tapping the plus button would not.
+            if ProcessInfo.processInfo.environment["SEISMIC_SHOW_DESIGNER"] == "1" {
+                showingDesigner = true
             }
         }
         .sheet(isPresented: $showingImport) { BuildingImportSheet() }
+        .sheet(isPresented: $showingDesigner) {
+            NavigationStack {
+                BuildingDesignerScreen()
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { showingDesigner = false }
+                        }
+                    }
+            }
+        }
         .sheet(item: $detail) { building in
             BuildingDetailSheet(building: building)
         }
