@@ -27,3 +27,10 @@ Package.resolved
 
 # macOS
 .DS_Store
+
+# Capacitor
+app/node_modules/
+app/ios/App/Pods/
+app/ios/App/App/public/
+app/ios/DerivedData/
+app/ios/App/build/

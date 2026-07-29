@@ -1,0 +1,18 @@
+{
+  "appId": "app.seismic.ios",
+  "appName": "Seismic",
+  "webDir": "www",
+  "ios": {
+    "contentInset": "never",
+    "backgroundColor": "#0a0b0d",
+    "limitsNavigationsToAppBoundDomains": true
+  },
+  "plugins": {
+    "SplashScreen": {
+      "launchAutoHide": true,
+      "launchShowDuration": 600,
+      "backgroundColor": "#0a0b0d",
+      "showSpinner": false
+    }
+  }
+}
