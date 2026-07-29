@@ -72,6 +72,19 @@ final class BuildingSceneController: ObservableObject {
         didSet { exaggerationChanged() }
     }
 
+    /// Shape of the view currently showing this scene, width over height.
+    ///
+    /// Reported by the view on layout rather than read from it on demand:
+    /// `updateUIView` runs before the view has been laid out, where the bounds
+    /// are still zero. Reading them there returned an aspect ratio of exactly 1
+    /// for a tall portrait screen and framed it as though it were square.
+    private var viewportAspect: Float = 0.6
+
+    func setViewportAspect(_ aspect: Float) {
+        guard aspect > 0.01 else { return }
+        viewportAspect = aspect
+    }
+
     private var storeyHeight: Double = 3.4
     private var footprint: [Coordinate2D] = []
 
@@ -326,21 +339,74 @@ final class BuildingSceneController: ObservableObject {
     private func frameCamera() {
         guard let building else { return }
         let height = Float(building.height)
+
+        // A provisional position, in case a fit never arrives. `fitToViewport`
+        // supersedes this as soon as the view can report its own shape.
         let plan = Float(max(building.footprintArea.squareRoot(), 8))
+        let standoff = max(height, plan) * 3.0
 
-        // Frame the *whole* building with margin, and account for the control
-        // panel covering roughly the lower third of the screen — so the aim
-        // point sits above centre rather than at mid-height. Framing on height
-        // alone leaves a squat, wide building spilling out of both sides.
-        let subject = max(height, plan * 1.4)
-        let distance = subject * 5.0 + plan
+        cameraNode.position = SCNVector3(standoff * 0.42, height * 0.75,
+                                         standoff * 0.63)
+        cameraNode.look(at: SCNVector3(0, height * 0.45, 0))
+    }
 
-        // Aim a little below mid-height: whatever the camera looks at lands at
-        // the centre of the frame, and the collapsed control bar still occupies
-        // the bottom of the screen.
-        cameraNode.position = SCNVector3(distance * 0.5, height * 0.8 + plan * 0.3,
-                                         distance * 0.72)
-        cameraNode.look(at: SCNVector3(0, height * 0.38, 0))
+    /// Pulls the camera to a distance that fits the building in *this* viewport.
+    ///
+    /// `frameNodes` keeps the orientation `frameCamera` established and solves
+    /// only for distance, against the view's real aspect ratio and field of
+    /// view. It fits tightly, so `margin` then backs off along the same axis to
+    /// leave room for whatever chrome is drawn over the scene — more on the
+    /// simulator, which has a card at the top and a control bar at the bottom,
+    /// than in a preview that has neither.
+    /// Frames the building for a viewport of a given shape.
+    ///
+    /// The aspect ratio has to come from the view, because it is the whole
+    /// difficulty: the same building sits in a near-square preview and in a
+    /// full-bleed portrait screen, and a distance that suits one leaves the
+    /// other either spilling off both edges or reduced to a speck. Three
+    /// attempts at a viewport-independent constant each got one screen right.
+    ///
+    /// `frameNodes` looks like the answer — it is SceneKit's own fit — but it
+    /// fits tightly with no way to ask for margin, and margin is exactly what a
+    /// screen with a card over the top and a control bar across the bottom
+    /// needs. Pulling the camera back afterwards does not survive
+    /// `allowsCameraControl`. So the distance is solved here instead.
+    func fitToViewport(margin: Float) {
+        guard let building, viewportAspect > 0.01 else { return }
+        let aspectRatio = viewportAspect
+
+        // Measure what was built rather than what was described. The plan is
+        // rarely square — this seed's is 2.6:1 — so `sqrt(footprintArea)`
+        // understates the long side badly, and the floor slabs overhang on top
+        // of that.
+        var minimum = SCNVector3Zero
+        var maximum = SCNVector3Zero
+        buildingRoot.__getBoundingBoxMin(&minimum, max: &maximum)
+
+        let height = Float(building.height)
+        let fallback = Float(max(building.footprintArea.squareRoot(), 8))
+        let sizeX = maximum.x > minimum.x ? maximum.x - minimum.x : fallback
+        let sizeY = maximum.y > minimum.y ? maximum.y - minimum.y : height
+        let sizeZ = maximum.z > minimum.z ? maximum.z - minimum.z : fallback
+        let centreY = maximum.y > minimum.y ? (minimum.y + maximum.y) / 2 : height / 2
+
+        // Fit the bounding sphere. Slightly generous for a long thin plan, since
+        // it uses the diagonal, but it holds for every viewing angle — and the
+        // camera can be orbited to any of them.
+        let radius = (sizeX * sizeX + sizeY * sizeY + sizeZ * sizeZ).squareRoot() / 2
+
+        // The field of view is pinned vertical, so the horizontal one follows
+        // from the aspect ratio rather than from SceneKit's automatic choice —
+        // which silently switches to whichever dimension is smaller and made
+        // the two screens behave differently for no visible reason.
+        let vertical = Float(42 * Double.pi / 180)
+        let horizontal = 2 * atan(tan(vertical / 2) * aspectRatio)
+        let limiting = min(vertical, horizontal)
+        let distance = radius / sin(limiting / 2) * margin
+
+        cameraNode.position = SCNVector3(distance * 0.42, centreY + radius * 0.55,
+                                         distance * 0.63)
+        cameraNode.look(at: SCNVector3(0, centreY, 0))
     }
 
     // MARK: Styling
@@ -533,9 +599,40 @@ extension Polygon {
 struct BuildingSceneView: UIViewRepresentable {
     @ObservedObject var controller: BuildingSceneController
     var allowsCameraControl = true
+    /// How much room to leave around the building, over a tight fit. The default
+    /// suits a full screen with a card over the top of it and a control bar
+    /// across the bottom; a plain preview wants less.
+    var framingMargin: Float = 1.35
+
+    /// Reports its own shape when the layout system settles it.
+    ///
+    /// The only reliable moment to learn a view's aspect ratio: by the time
+    /// `updateUIView` runs, SwiftUI has not yet given the view a size.
+    final class FramingView: SCNView {
+        var onResize: ((CGSize) -> Void)?
+        private var lastSize: CGSize = .zero
+
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            guard bounds.width > 1, bounds.height > 1, bounds.size != lastSize else { return }
+            lastSize = bounds.size
+            onResize?(bounds.size)
+        }
+    }
 
     func makeUIView(context: Context) -> SCNView {
-        let view = SCNView()
+        let view = FramingView()
+        // Captured by value: the margin is a property of this view, not of the
+        // controller, because several screens share one controller shape but not
+        // one amount of chrome over it.
+        let controller = controller
+        let margin = framingMargin
+        view.onResize = { size in
+            MainActor.assumeIsolated {
+                controller.setViewportAspect(Float(size.width / size.height))
+                controller.fitToViewport(margin: margin)
+            }
+        }
         view.scene = controller.scene
         view.pointOfView = controller.pointOfView
         view.allowsCameraControl = allowsCameraControl
@@ -581,22 +678,36 @@ struct BuildingSceneView: UIViewRepresentable {
         controller.resetCamera()
         view.pointOfView = controller.pointOfView
         view.defaultCameraController.pointOfView = controller.pointOfView
-
+        // After the point of view is in place, not before: `frameNodes` solves
+        // for the camera it has been given.
+        if view.bounds.width > 1, view.bounds.height > 1 {
+            controller.setViewportAspect(Float(view.bounds.width / view.bounds.height))
+        }
+        controller.fitToViewport(margin: framingMargin)
     }
 
-    func makeCoordinator() -> Coordinator { Coordinator(controller: controller) }
+    func makeCoordinator() -> Coordinator {
+        Coordinator(controller: controller, margin: framingMargin)
+    }
 
     @MainActor
     final class Coordinator: NSObject {
         let controller: BuildingSceneController
         weak var view: SCNView?
         var lastFramingToken = -1
+        var margin: Float
 
-        init(controller: BuildingSceneController) { self.controller = controller }
+        init(controller: BuildingSceneController, margin: Float) {
+            self.controller = controller
+            self.margin = margin
+        }
 
         @objc func handleDoubleTap() {
             guard let view else { return }
-            view.defaultCameraController.frameNodes(controller.framingTargets)
+            controller.resetCamera()
+            controller.fitToViewport(margin: margin)
+            view.pointOfView = controller.pointOfView
+            view.defaultCameraController.pointOfView = controller.pointOfView
             Haptics.shared.play(.selection)
         }
     }

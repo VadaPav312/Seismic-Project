@@ -78,7 +78,7 @@ struct ComparisonView: View {
     private func pane(building: BuildingModel?, controller: BuildingSceneController,
                       runner: SimulationRunner, width: CGFloat) -> some View {
         ZStack(alignment: .topLeading) {
-            BuildingSceneView(controller: controller)
+            BuildingSceneView(controller: controller, framingMargin: 1.3)
             VStack(alignment: .leading, spacing: 4) {
                 Text(building?.name ?? "—")
                     .font(Theme.Typography.label)

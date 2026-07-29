@@ -140,7 +140,7 @@ struct BuildingDetailSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: Theme.Metrics.spacingLoose) {
-                    BuildingSceneView(controller: controller)
+                    BuildingSceneView(controller: controller, framingMargin: 1.3)
                         .frame(height: 260)
                         .clipShape(RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadius,
                                                     style: .continuous))
@@ -252,6 +252,51 @@ struct BuildingDetailSheet: View {
     /// screen is open, so neither do its modes.
     @State private var derived: (modes: [ModeShape], thresholds: DriftThresholds)?
 
+    /// The three-dimensional picture, from the building's real cross-section.
+    private var towerAnalysis: some View {
+        let result = TowerAnalysis.analyse(building)
+        let section = SectionProperties.of(building.footprint)
+
+        return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+            ReadoutGrid(readouts: [
+                Readout(label: "Stiff axis", value: String(format: "%.2f", result.majorAxisPeriod),
+                        unit: "s", size: .small),
+                Readout(label: "Weak axis", value: String(format: "%.2f", result.minorAxisPeriod),
+                        unit: "s", tint: Theme.Palette.accent, size: .small),
+                Readout(label: "Torsion", value: String(format: "%.2f", result.torsionalPeriod),
+                        unit: "s", size: .small),
+                Readout(label: "Bending",
+                        value: String(format: "%.0f", result.flexuralFraction * 100),
+                        unit: "%", size: .small),
+            ], columns: 2)
+
+            Text(section.interpretation)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(result.isBendingDominated
+                 ? "Tall enough to behave as a cantilever — most of its movement is bending."
+                 : "Squat enough to deform mostly by shearing, storey against storey.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if result.isTorsionallySensitive {
+                // The uncoupled ratio, for the reason given in the designer.
+                Text(String(
+                    format: "Its twisting mode is %.0f%% as slow as its swaying one, so it "
+                        + "rotates about as readily as it leans. The corners will travel "
+                        + "further than the centre.", result.torsionalRatio * 100))
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.verdictAmber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Divider().overlay(Theme.Palette.hairline)
+        }
+    }
+
     private var derivedSection: some View {
         let model = ShearBuilding.from(building)
         let modes = derived?.modes ?? ModalAnalysis.modes(of: model)
@@ -260,6 +305,8 @@ struct BuildingDetailSheet: View {
 
         return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
             SectionLabel("Derived properties", systemImage: "function")
+
+            towerAnalysis
 
             ReadoutGrid(readouts: [
                 Readout(label: "Natural period",

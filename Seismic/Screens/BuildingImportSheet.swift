@@ -174,7 +174,7 @@ struct BuildingImportSheet: View {
 
     private func assembled(_ building: BuildingModel) -> some View {
         VStack(alignment: .leading, spacing: Theme.Metrics.spacingLoose) {
-            BuildingSceneView(controller: controller)
+            BuildingSceneView(controller: controller, framingMargin: 1.3)
                 .frame(height: 280)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadius,
                                             style: .continuous))

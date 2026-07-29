@@ -133,6 +133,16 @@ struct BuildingDesignerScreen: View {
         ModalAnalysis.fundamentalPeriod(of: ShearBuilding.from(building))
     }
 
+    /// The three-dimensional analysis: both sway directions and torsion,
+    /// derived from the real cross-section of the plan being drawn.
+    private var tower: TowerAnalysis.Result {
+        TowerAnalysis.analyse(building)
+    }
+
+    private var section: SectionProperties {
+        SectionProperties.of(building.footprint)
+    }
+
     private var expectedPeriod: Double {
         building.empiricalPeriod
     }
@@ -168,7 +178,7 @@ struct BuildingDesignerScreen: View {
 
     private var preview: some View {
         VStack(spacing: Theme.Metrics.spacing) {
-            BuildingSceneView(controller: scene)
+            BuildingSceneView(controller: scene, framingMargin: 1.3)
                 .frame(height: 300)
                 .clipShape(RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadius,
                                             style: .continuous))
@@ -181,6 +191,8 @@ struct BuildingDesignerScreen: View {
                 Readout(label: "Storeys", value: "\(Int(draft.storeys.rounded()))"),
                 Readout(label: "Height", value: String(format: "%.0f", draft.height), unit: "m"),
             ], columns: 2)
+
+            towerReadout
 
             // The two periods disagreeing is not an error, and saying so stops
             // it reading as one. The code formula is a regression through real
@@ -200,6 +212,64 @@ struct BuildingDesignerScreen: View {
             }
         }
         .instrumentPanel()
+    }
+
+    /// The part a single period cannot tell you.
+    private var towerReadout: some View {
+        let result = tower
+        return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+            Divider().overlay(Theme.Palette.hairline)
+
+            ReadoutGrid(readouts: [
+                Readout(label: "Along the stiff axis",
+                        value: String(format: "%.2f", result.majorAxisPeriod), unit: "s"),
+                Readout(label: "Along the weak axis",
+                        value: String(format: "%.2f", result.minorAxisPeriod), unit: "s"),
+                Readout(label: "In torsion",
+                        value: String(format: "%.2f", result.torsionalPeriod), unit: "s"),
+                Readout(label: "Deflection from bending",
+                        value: String(format: "%.0f", result.flexuralFraction * 100), unit: "%"),
+            ], columns: 2)
+
+            Text(result.isBendingDominated
+                 ? "This is tall enough to behave as a cantilever: most of its movement is "
+                   + "bending rather than storeys shearing past one another. A shear model "
+                   + "would report it as considerably stiffer than it is."
+                 : "Squat enough that it deforms mostly by shearing, storey against storey — "
+                   + "which is the assumption the simpler model makes, and here it holds.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if section.area > 0, !section.interpretation.isEmpty {
+                Text(section.interpretation)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if result.isTorsionallySensitive {
+                InlineNotice(
+                    level: .warning,
+                    title: "It twists about as readily as it sways",
+                    message: String(
+                        // The uncoupled ratio, which is the quantity the flag is
+                        // raised on. The listed torsional period above is the
+                        // coupled one and will read shorter — eccentricity
+                        // stiffens the twisting mode while softening the swaying
+                        // one, so quoting the two coupled periods side by side
+                        // would make this warning look like it contradicts them.
+                        format: "Its twisting mode is %.0f%% as slow as its swaying one. When "
+                            + "those are close the building rotates before it leans, and the "
+                            + "corners travel further than the centre — which is where the "
+                            + "damage appears. %@",
+                        result.torsionalRatio * 100,
+                        result.torsionalRatio > 1
+                            ? "Here twisting is the softer of the two, so it is what an "
+                              + "earthquake finds first."
+                            : "Bracing further out towards the perimeter is what shortens it."))
+            }
+        }
     }
 
     // MARK: Sections
