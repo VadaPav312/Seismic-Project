@@ -88,6 +88,24 @@ final class BuildingSceneController: ObservableObject {
     private var storeyHeight: Double = 3.4
     private var footprint: [Coordinate2D] = []
 
+    /// How this building twists, derived from its plan when it is built.
+    ///
+    /// Held here so the per-frame path stays arithmetic: the eccentricity and
+    /// the torsional radius are properties of the shape and do not change while
+    /// the earthquake runs, so computing them once at build time and doing two
+    /// multiplications per floor per frame is all the twist costs.
+    private(set) var torsion: TorsionModel = .none
+
+    /// The largest twist the view will draw, radians.
+    ///
+    /// Rotation is exaggerated by the same factor as the sway, because a twist
+    /// drawn at true scale is as invisible as a drift of 0.3% — but a large
+    /// exaggeration on an already torsionally irregular building would spin the
+    /// floors past the point where the picture means anything. Twelve degrees
+    /// is about the limit at which a viewer still reads it as one building
+    /// rather than a stack of loose plates.
+    private let maximumDrawnRotation: Float = 12 * .pi / 180
+
     init() { configureScene() }
 
     // MARK: Scene setup
@@ -166,6 +184,7 @@ final class BuildingSceneController: ObservableObject {
         footprint = building.footprint.isEmpty
             ? BuildingModel.rectangularFootprint(area: building.footprintArea)
             : building.footprint
+        torsion = TorsionModel.of(building)
 
         addGround(size: max(building.footprintArea.squareRoot() * 6, 60))
 
@@ -281,16 +300,20 @@ final class BuildingSceneController: ObservableObject {
     /// Centring matters: the polygon arrives in metres relative to the
     /// building's anchor, so an un-centred path would put the tower off to one
     /// side of its own ground plane and out of the camera's framing.
+    /// Curves are drawn as curves, corners are kept sharp.
+    ///
+    /// The outline arrives as a list of points whichever way it was obtained —
+    /// traced from OpenStreetMap or generated from a plan shape — so a round
+    /// tower arrives as a run of short straight segments. Drawing those
+    /// literally is what made every curved building in the app come out
+    /// faceted, like a pencil. `OutlineCurvature` works out which runs of
+    /// points were meant to be a single curve, and those runs are emitted as
+    /// cubic Béziers through the same points.
+    ///
+    /// Through the same points, not near them: the vertices are survey data,
+    /// and a smoothing that moved them would be moving the building's walls.
     private func footprintPath(scale: Double) -> UIBezierPath? {
-        let points = footprint
-        // Three points is the minimum for an area; the closing duplicate that
-        // GeoJSON-style rings carry is dropped so it cannot create a zero
-        // length edge.
-        var ring = points
-        if let first = ring.first, let last = ring.last,
-           abs(first.x - last.x) < 1e-6, abs(first.y - last.y) < 1e-6 {
-            ring.removeLast()
-        }
+        let ring = OutlineCurvature.normalised(footprint)
         guard ring.count >= 3 else { return nil }
 
         let box = Polygon.boundingBox(ring)
@@ -298,16 +321,33 @@ final class BuildingSceneController: ObservableObject {
         let centreY = (box.min.y + box.max.y) / 2
         guard box.max.x - box.min.x > 0.5, box.max.y - box.min.y > 0.5 else { return nil }
 
+        // The polygon's y is a ground-plane axis; the extrusion happens along
+        // the shape's own z, and the node is rotated flat by the caller.
+        func place(_ point: Coordinate2D) -> CGPoint {
+            CGPoint(x: (point.x - centreX) * scale, y: (point.y - centreY) * scale)
+        }
+
+        guard let drawn = OutlineCurvature.path(for: ring) else { return nil }
+
         let path = UIBezierPath()
-        for (index, point) in ring.enumerated() {
-            // The polygon's y is a ground-plane axis; the extrusion happens
-            // along the shape's own z, and the node is rotated flat below.
-            let position = CGPoint(x: (point.x - centreX) * scale,
-                                   y: (point.y - centreY) * scale)
-            if index == 0 { path.move(to: position) } else { path.addLine(to: position) }
+        path.move(to: place(drawn.start))
+        for segment in drawn.segments {
+            switch segment {
+            case .line(let to):
+                path.addLine(to: place(to))
+            case .curve(let to, let control1, let control2):
+                path.addCurve(to: place(to),
+                              controlPoint1: place(control1), controlPoint2: place(control2))
+            }
         }
         path.close()
-        path.flatness = 0.15
+        // Flatness is how finely SceneKit tessellates those curves before
+        // extruding them, in points of allowed deviation. The old 0.15 was
+        // loose enough to reintroduce the faceting the curves were added to
+        // remove; this is fine enough that the silhouette reads as smooth and
+        // still an order of magnitude cheaper than tessellating by vertex
+        // count.
+        path.flatness = 0.02
         return path
     }
 
@@ -474,8 +514,18 @@ final class BuildingSceneController: ObservableObject {
         let exaggeration = Float(displacementExaggeration)
 
         for (index, node) in storeyNodes.enumerated() {
-            let offset = index < displacements.count ? Float(displacements[index]) : 0
-            node.position.x = offset * exaggeration
+            let offset = index < displacements.count ? displacements[index] : 0
+
+            // A floor plate is rigid, so it does not merely slide: it slides,
+            // crabs sideways, and rotates, all fixed by the same storey shear.
+            // Writing only the first of those was drawing a building that
+            // cannot exist — every real plan with any asymmetry in it twists,
+            // and the twist is what the corners feel.
+            let motion = torsion.motion(forDisplacement: offset)
+            node.position.x = Float(motion.along) * exaggeration
+            node.position.z = Float(motion.across) * exaggeration
+            node.eulerAngles.y = min(max(Float(motion.rotation) * exaggeration,
+                                         -maximumDrawnRotation), maximumDrawnRotation)
 
             guard style == .driftHeatMap, index < drifts.count else { continue }
 
@@ -520,6 +570,8 @@ final class BuildingSceneController: ObservableObject {
     func resetPositions() {
         for node in storeyNodes {
             node.position.x = 0
+            node.position.z = 0
+            node.eulerAngles.y = 0
             for child in node.childNodes {
                 child.geometry?.firstMaterial?.emission.contents = UIColor.black
             }
@@ -544,23 +596,42 @@ final class BuildingSceneController: ObservableObject {
         guard !storeyNodes.isEmpty else { return }
         for (index, node) in storeyNodes.enumerated() {
             guard index < mode.shape.count else { continue }
-            let offset = Float(mode.shape[index] * amplitude)
-            let forward = SCNAction.moveBy(x: CGFloat(offset), y: 0, z: 0,
-                                           duration: mode.period / 2)
-            forward.timingMode = .easeInEaseOut
-            let back = SCNAction.moveBy(x: CGFloat(-offset * 2), y: 0, z: 0,
-                                        duration: mode.period)
-            back.timingMode = .easeInEaseOut
-            let recover = SCNAction.moveBy(x: CGFloat(offset), y: 0, z: 0,
-                                           duration: mode.period / 2)
-            recover.timingMode = .easeInEaseOut
+            let displacement = mode.shape[index] * amplitude
+            let offset = Float(displacement)
+            // The same twist the solved response gets. A mode shape animated as
+            // pure translation shows a building that only leans, which for an
+            // irregular plan is the wrong picture of its own first mode.
+            let across = CGFloat(displacement * torsion.crossAxisRatio)
+            let spin = CGFloat(min(max(torsion.rotation(forDisplacement: displacement),
+                                       Double(-maximumDrawnRotation)),
+                                   Double(maximumDrawnRotation)))
+
+            func leg(_ scale: CGFloat, _ duration: TimeInterval) -> SCNAction {
+                let action = SCNAction.group([
+                    .moveBy(x: CGFloat(offset) * scale, y: 0, z: across * scale,
+                            duration: duration),
+                    .rotateBy(x: 0, y: spin * scale, z: 0, duration: duration),
+                ])
+                action.timingMode = .easeInEaseOut
+                return action
+            }
+
             node.removeAllActions()
-            node.runAction(.repeatForever(.sequence([forward, back, recover])))
+            node.runAction(.repeatForever(.sequence([
+                leg(1, mode.period / 2),
+                leg(-2, mode.period),
+                leg(1, mode.period / 2),
+            ])))
         }
     }
 
     func stopModeAnimation() {
-        for node in storeyNodes { node.removeAllActions(); node.position.x = 0 }
+        for node in storeyNodes {
+            node.removeAllActions()
+            node.position.x = 0
+            node.position.z = 0
+            node.eulerAngles.y = 0
+        }
     }
 
     /// The narrated assembly: storeys appear from the ground up.

@@ -41,6 +41,18 @@ struct BuildingDesignerScreen: View {
         var footprintArea = 620.0
         var planShape: PlanShape = .rectangular
         var aspectRatio = 1.6
+
+        /// The building's real outline, when it was opened from one that has
+        /// one — a traced OpenStreetMap ring, or a plan drawn earlier.
+        ///
+        /// Kept separately from the generated shapes because it must survive
+        /// being edited. Opening an imported building and changing its material
+        /// used to silently replace its actual footprint with whichever
+        /// idealised shape the picker happened to be showing, throwing away the
+        /// one genuinely site-specific thing the importer had found.
+        var tracedFootprint: [Coordinate2D] = []
+        /// Whether to use that outline rather than a generated shape.
+        var usesTracedFootprint = false
         var massingStyle: MassingStyle = .uniform
         var massingAmount = 0.45
         var podiumFraction = 0.25
@@ -100,6 +112,39 @@ struct BuildingDesignerScreen: View {
         }
     }
 
+    /// The plan being used: the building's own outline where it has one and it
+    /// has not been deliberately replaced, otherwise the chosen shape.
+    private var footprint: [Coordinate2D] {
+        if draft.usesTracedFootprint, draft.tracedFootprint.count >= 3 {
+            return draft.tracedFootprint
+        }
+        return draft.planShape.polygon(area: draft.footprintArea,
+                                       aspectRatio: draft.aspectRatio)
+    }
+
+    /// Which fields this screen should claim as hand-entered.
+    ///
+    /// For a new building, all of them. For an edit, only the ones whose value
+    /// actually moved — otherwise opening an imported building to correct its
+    /// soil class would restamp its height, its storey count and its material
+    /// as "entered by you", quietly erasing the sources the import screen had
+    /// gone to some trouble to establish.
+    private var editedFields: [String] {
+        let all = ["height", "storeyCount", "footprintArea", "material", "system", "soil"]
+        guard let editing else { return all }
+        return all.filter { field in
+            switch field {
+            case "height": abs(draft.height - editing.height) > 0.01
+            case "storeyCount": Int(draft.storeys.rounded()) != editing.storeyCount
+            case "footprintArea": abs(draft.footprintArea - editing.footprintArea) > 0.01
+            case "material": draft.material != editing.material
+            case "system": draft.system != editing.system
+            case "soil": draft.soil != editing.soil
+            default: false
+            }
+        }
+    }
+
     private var building: BuildingModel {
         BuildingModel(
             id: editing?.id ?? UUID(),
@@ -110,23 +155,28 @@ struct BuildingDesignerScreen: View {
             storeyCount: Int(draft.storeys.rounded()),
             height: draft.height,
             footprintArea: draft.footprintArea,
-            footprint: draft.planShape.polygon(area: draft.footprintArea,
-                                               aspectRatio: draft.aspectRatio),
+            footprint: footprint,
             massing: massing,
             yearBuilt: Int(draft.yearBuilt.rounded()),
             material: draft.material,
             system: draft.system,
             soil: draft.soil,
             retrofit: draft.retrofit,
-            notes: "Designed in the app rather than imported. Every figure here is one you "
-                + "chose, so the model is exactly as good as those choices.",
+            notes: editing?.notes
+                ?? ("Designed in the app rather than imported. Every figure here is one you "
+                    + "chose, so the model is exactly as good as those choices."),
             // Everything is entered, and the provenance says so — the same
-            // standard an imported building is held to.
-            provenance: Dictionary(uniqueKeysWithValues:
-                ["height", "storeyCount", "footprintArea", "material", "system", "soil"]
-                    .map { ($0, FactProvenance(source: .userEntered, confidence: 0.95,
-                                               detail: "Entered by you")) }),
-            privacy: .exact)
+            // standard an imported building is held to. Editing keeps whatever
+            // the building already carried and overwrites only the fields this
+            // screen actually sets, so a height from Wikidata is not relabelled
+            // as hand-entered merely because somebody opened the editor.
+            provenance: (editing?.provenance ?? [:]).merging(
+                Dictionary(uniqueKeysWithValues: editedFields.map {
+                    ($0, FactProvenance(source: .userEntered, confidence: 0.95,
+                                        detail: "Entered by you"))
+                }),
+                uniquingKeysWith: { _, entered in entered }),
+            privacy: editing?.privacy ?? .exact)
     }
 
     private var period: Double {
@@ -339,11 +389,56 @@ struct BuildingDesignerScreen: View {
         VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
             SectionLabel("Plan", systemImage: "square.on.square.dashed")
 
+            // The building's real outline, offered first and selected by
+            // default, so the ordinary act of opening an imported building and
+            // changing something else cannot cost it its shape.
+            if draft.tracedFootprint.count >= 3 {
+                Button {
+                    draft.usesTracedFootprint = true
+                    settle()
+                } label: {
+                    HStack(spacing: Theme.Metrics.spacing) {
+                        OutlineThumbnail(ring: draft.tracedFootprint)
+                            .frame(width: 46, height: 46)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Its own outline")
+                                .font(Theme.Typography.callout)
+                            Text("The real traced plan, \(draft.tracedFootprint.count) points. "
+                                 + "Idealised shapes below replace it.")
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                        if draft.usesTracedFootprint {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(Theme.Palette.accent)
+                        }
+                    }
+                    .padding(10)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall,
+                                         style: .continuous)
+                            .fill(draft.usesTracedFootprint
+                                  ? Theme.Palette.accentDim : Theme.Palette.surfaceRaised))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall,
+                                         style: .continuous)
+                            .strokeBorder(draft.usesTracedFootprint
+                                          ? Theme.Palette.accent : Theme.Palette.hairline,
+                                          lineWidth: 1))
+                    .foregroundStyle(draft.usesTracedFootprint
+                                     ? Theme.Palette.accent : Theme.Palette.textSecondary)
+                }
+                .buttonStyle(.plain)
+            }
+
             LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3),
                       spacing: 8) {
                 ForEach(PlanShape.allCases, id: \.self) { shape in
                     Button {
                         draft.planShape = shape
+                        draft.usesTracedFootprint = false
                         settle()
                     } label: {
                         VStack(spacing: 6) {
@@ -359,34 +454,40 @@ struct BuildingDesignerScreen: View {
                         .background(
                             RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall,
                                              style: .continuous)
-                                .fill(draft.planShape == shape
+                                .fill(isSelected(shape)
                                       ? Theme.Palette.accentDim : Theme.Palette.surfaceRaised)
                         )
                         .overlay(
                             RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall,
                                              style: .continuous)
-                                .strokeBorder(draft.planShape == shape
+                                .strokeBorder(isSelected(shape)
                                               ? Theme.Palette.accent : Theme.Palette.hairline,
                                               lineWidth: 1)
                         )
-                        .foregroundStyle(draft.planShape == shape
+                        .foregroundStyle(isSelected(shape)
                                          ? Theme.Palette.accent : Theme.Palette.textSecondary)
                     }
                     .buttonStyle(.plain)
                 }
             }
 
-            if draft.planShape == .rectangular || draft.planShape == .setbackTower {
+            if !draft.usesTracedFootprint,
+               draft.planShape == .rectangular || draft.planShape == .setbackTower {
                 slider("Proportion", value: $draft.aspectRatio, range: 1...6, step: 0.1,
                        format: { String(format: "%.1f : 1", $0) })
             }
 
-            Text(draft.planShape.isIrregular
-                 ? "Re-entrant corners concentrate stress, and mass away from the centre of "
-                   + "rigidity twists a building rather than simply pushing it. Plan "
-                   + "irregularity is among the strongest predictors of earthquake damage there is."
-                 : "A regular plan distributes demand evenly and is the easiest shape to make "
-                   + "behave predictably.")
+            Text(draft.usesTracedFootprint
+                 ? "This is the building's measured plan, so its stiffness in each direction and "
+                   + "its resistance to twisting are computed from the real shape rather than "
+                   + "from an idealisation of it."
+                 : (draft.planShape.isIrregular
+                    ? "Re-entrant corners concentrate stress, and mass away from the centre of "
+                      + "rigidity twists a building rather than simply pushing it. Plan "
+                      + "irregularity is among the strongest predictors of earthquake damage "
+                      + "there is."
+                    : "A regular plan distributes demand evenly and is the easiest shape to make "
+                      + "behave predictably."))
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.Palette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -639,6 +740,17 @@ struct BuildingDesignerScreen: View {
         scene.build(building, animated: false)
     }
 
+    private func isSelected(_ shape: PlanShape) -> Bool {
+        !draft.usesTracedFootprint && draft.planShape == shape
+    }
+
+    /// Fills the draft from an existing building.
+    ///
+    /// Everything the screen can change has to come back, including the two
+    /// things it previously dropped — the plan and the massing. Losing those on
+    /// load meant that opening a tapered tower and pressing Save turned it into
+    /// a uniform rectangular block, which is a data-destroying edit disguised
+    /// as a no-op.
     private func load(_ model: BuildingModel) {
         draft.name = model.name
         draft.storeys = Double(model.storeyCount)
@@ -650,6 +762,63 @@ struct BuildingDesignerScreen: View {
         draft.soil = model.soil
         draft.retrofit = model.retrofit
         draft.yearBuilt = Double(model.yearBuilt ?? 1994)
+
+        draft.tracedFootprint = model.footprint
+        draft.usesTracedFootprint = model.footprint.count >= 3
+
+        let (style, amount, podium) = MassingStyle.infer(from: model.massing)
+        draft.massingStyle = style
+        draft.massingAmount = amount
+        draft.podiumFraction = podium
+    }
+}
+
+extension BuildingDesignerScreen.MassingStyle {
+    /// Reads a massing profile back as the control settings that produce it.
+    ///
+    /// The profile is the stored form and the four styles are the vocabulary
+    /// the screen offers, so the mapping only has to be close enough that
+    /// re-saving an untouched building leaves it as it was. It keys off the
+    /// abrupt steps, because that is what actually distinguishes the shapes: a
+    /// podium has exactly one, a setback several, a taper none.
+    static func infer(from massing: Massing) -> (style: Self, amount: Double,
+                                                 podiumFraction: Double) {
+        let topScale = massing.stations.last?.scale ?? 1
+        let amount = min(max(1 - topScale, 0.1), 0.8)
+
+        if massing.isUniform { return (.uniform, 0.45, 0.25) }
+
+        var steps: [(fraction: Double, drop: Double)] = []
+        for index in 1..<massing.stations.count {
+            let lower = massing.stations[index - 1], upper = massing.stations[index]
+            guard upper.heightFraction - lower.heightFraction < 0.02 else { continue }
+            let drop = lower.scale - upper.scale
+            if drop > 0.02 { steps.append((upper.heightFraction, drop)) }
+        }
+
+        if steps.isEmpty { return (.tapered, amount, 0.25) }
+        if steps.count == 1 {
+            return (.podium, amount, min(max(steps[0].fraction, 0.1), 0.6))
+        }
+        return (.setback, amount, 0.25)
+    }
+}
+
+/// A drawing of an arbitrary outline, for the plan picker.
+///
+/// Separate from `PlanShapeThumbnail`, which draws one of the standard shapes
+/// from its generator; this draws whatever ring it is handed, which is the only
+/// way to show a building its own traced plan.
+struct OutlineThumbnail: View {
+    let ring: [Coordinate2D]
+
+    var body: some View {
+        Canvas { context, size in
+            let path = Path.outline(ring, fitting: size, inset: 0.82)
+            context.fill(path, with: .color(Theme.Palette.accent.opacity(0.22)))
+            context.stroke(path, with: .color(Theme.Palette.accent), lineWidth: 1.2)
+        }
+        .accessibilityLabel("The building's traced outline")
     }
 }
 
@@ -662,27 +831,53 @@ struct PlanShapeThumbnail: View {
 
     var body: some View {
         Canvas { context, size in
-            let ring = shape.polygon(area: 100)
-            guard ring.count > 2 else { return }
-
-            let xs = ring.map(\.x)
-            let ys = ring.map(\.y)
-            let width = (xs.max() ?? 1) - (xs.min() ?? 0)
-            let depth = (ys.max() ?? 1) - (ys.min() ?? 0)
-            let scale = min(size.width / max(width, 0.001),
-                            size.height / max(depth, 0.001)) * 0.78
-
-            var path = Path()
-            for (index, point) in ring.enumerated() {
-                let location = CGPoint(x: size.width / 2 + point.x * scale,
-                                       y: size.height / 2 - point.y * scale)
-                if index == 0 { path.move(to: location) } else { path.addLine(to: location) }
-            }
-            path.closeSubpath()
-
+            let path = Path.outline(shape.polygon(area: 100), fitting: size, inset: 0.78)
             context.fill(path, with: .color(Theme.Palette.accent.opacity(0.22)))
             context.stroke(path, with: .color(Theme.Palette.accent), lineWidth: 1.3)
         }
+    }
+}
+
+extension Path {
+    /// A plan outline, curves and all, scaled to fit a box.
+    ///
+    /// Shared by both thumbnails and drawn through the same curve fitting the
+    /// 3D model uses, so the shape you pick in the grid is the shape you get.
+    /// Drawing the picker with straight lines while the model rounded them
+    /// would make the two disagree precisely on the shapes where the
+    /// difference is the whole point.
+    static func outline(_ ring: [Coordinate2D], fitting size: CGSize,
+                        inset: CGFloat = 0.8) -> Path {
+        guard let drawn = OutlineCurvature.path(for: ring) else { return Path() }
+        let points = OutlineCurvature.normalised(ring)
+        let xs = points.map(\.x), ys = points.map(\.y)
+        let width = (xs.max() ?? 1) - (xs.min() ?? 0)
+        let depth = (ys.max() ?? 1) - (ys.min() ?? 0)
+        let centreX = ((xs.max() ?? 0) + (xs.min() ?? 0)) / 2
+        let centreY = ((ys.max() ?? 0) + (ys.min() ?? 0)) / 2
+        let scale = min(size.width / max(width, 0.001),
+                        size.height / max(depth, 0.001)) * inset
+
+        // y is negated: the plan's y grows northwards and a canvas's grows
+        // downwards, so drawing it directly would show every asymmetric plan
+        // mirrored.
+        func place(_ point: Coordinate2D) -> CGPoint {
+            CGPoint(x: size.width / 2 + (point.x - centreX) * scale,
+                    y: size.height / 2 - (point.y - centreY) * scale)
+        }
+
+        var path = Path()
+        path.move(to: place(drawn.start))
+        for segment in drawn.segments {
+            switch segment {
+            case .line(let to):
+                path.addLine(to: place(to))
+            case .curve(let to, let control1, let control2):
+                path.addCurve(to: place(to), control1: place(control1), control2: place(control2))
+            }
+        }
+        path.closeSubpath()
+        return path
     }
 }
 

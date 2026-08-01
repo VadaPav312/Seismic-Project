@@ -132,9 +132,23 @@ struct LibraryScreen: View {
 struct BuildingDetailSheet: View {
     @EnvironmentObject private var env: AppEnvironment
     @Environment(\.dismiss) private var dismiss
-    let building: BuildingModel
+
+    /// The building this sheet was opened on. Only its identity is used — the
+    /// values are read back from the store through `building`, so an edit made
+    /// from here is visible the moment it is saved rather than after the sheet
+    /// has been closed and reopened.
+    let openedOn: BuildingModel
+    private var building: BuildingModel {
+        env.buildings.first { $0.id == openedOn.id } ?? openedOn
+    }
+
+    init(building: BuildingModel) { self.openedOn = building }
 
     @StateObject private var controller = BuildingSceneController()
+    @State private var showingEditor = false
+    @State private var showingRename = false
+    @State private var newName = ""
+    @State private var confirmingDelete = false
 
     var body: some View {
         NavigationStack {
@@ -201,12 +215,120 @@ struct BuildingDetailSheet: View {
                 ToolbarItem(placement: .primaryAction) {
                     Button("Simulate") {
                         env.selectedBuildingID = building.id
+                        // Selecting the building was only ever half of it. The
+                        // other half — actually going to the simulator — was
+                        // missing, so this button dismissed the sheet and
+                        // appeared to do nothing at all.
+                        env.requestedSection = .simulator
                         dismiss()
                     }
                 }
+                ToolbarItem(placement: .topBarTrailing) { manageMenu }
             }
             .onAppear { controller.build(building, animated: true) }
+            // Rebuilt after an edit, so the 3D view is not still showing the
+            // shape the building had before it was changed.
+            .onChange(of: building) { _, updated in controller.build(updated, animated: false) }
+            .sheet(isPresented: $showingEditor) {
+                NavigationStack {
+                    BuildingDesignerScreen(editing: building)
+                        .toolbar {
+                            ToolbarItem(placement: .cancellationAction) {
+                                Button("Cancel") { showingEditor = false }
+                            }
+                        }
+                }
+            }
+            .alert("Rename", isPresented: $showingRename) {
+                TextField("Name", text: $newName)
+                Button("Save") { rename() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("What this building is called in your library. Nothing else changes.")
+            }
+            .confirmationDialog("Delete “\(building.name)”?", isPresented: $confirmingDelete,
+                                titleVisibility: .visible) {
+                Button("Delete", role: .destructive) { delete() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Its assessments and measurement history go with it. This cannot be undone.")
+            }
         }
+    }
+
+    /// Edit, rename, duplicate, delete.
+    ///
+    /// The designer could already open on an existing building — it takes an
+    /// `editing` parameter — but nothing in the app ever passed one, so every
+    /// building in the library was permanent and unnameable once created. This
+    /// is that missing door.
+    private var manageMenu: some View {
+        Menu {
+            Button {
+                showingEditor = true
+            } label: {
+                Label("Edit", systemImage: "slider.horizontal.3")
+            }
+            Button {
+                newName = building.name
+                showingRename = true
+            } label: {
+                Label("Rename", systemImage: "pencil")
+            }
+            Button {
+                duplicate()
+            } label: {
+                Label("Duplicate", systemImage: "plus.square.on.square")
+            }
+            Divider()
+            Button(role: .destructive) {
+                confirmingDelete = true
+            } label: {
+                Label("Delete", systemImage: "trash")
+            }
+        } label: {
+            Image(systemName: "ellipsis.circle")
+        }
+        .accessibilityLabel("Manage this building")
+    }
+
+    private func rename() {
+        let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != building.name else { return }
+        var updated = building
+        updated.name = trimmed
+        env.store.upsert(updated)
+        env.refresh()
+        Haptics.shared.play(.selection)
+    }
+
+    /// A copy, with a new identity.
+    ///
+    /// Worth having because it is how you ask a what-if question honestly:
+    /// duplicate the real building, change the one thing, and keep both. Editing
+    /// the original in place would leave you with no record of what it actually
+    /// is.
+    private func duplicate() {
+        var copy = building
+        copy.id = UUID()
+        copy.name = building.name + " (copy)"
+        env.store.upsert(copy)
+        env.refresh()
+        Haptics.shared.play(.selection)
+        dismiss()
+    }
+
+    private func delete() {
+        env.store.delete(buildingID: building.id)
+        // The app must not be left pointing at a building that no longer
+        // exists; `selectedBuilding` would fall back to the first one anyway,
+        // but leaving a stale identifier around means the widget and the
+        // monitor keep naming the deleted building until something else
+        // happens to change the selection.
+        if env.selectedBuildingID == building.id { env.selectedBuildingID = nil }
+        env.refresh()
+        Haptics.shared.play(.warning)
+        dismiss()
     }
 
     /// Every attribute, with where it came from. The provenance chip is not

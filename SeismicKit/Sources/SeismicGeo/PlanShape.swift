@@ -22,6 +22,11 @@ public enum PlanShape: String, Codable, Sendable, CaseIterable {
     case uShaped
     case cruciform
     case circular
+    /// An ellipse — the plan of a great many towers that are described as
+    /// "round" and are not, and of every lens-shaped or lozenge block.
+    case elliptical
+    /// A rectangle with one long side bowed out into an arc: the curved slab.
+    case curvedSlab
     case octagonal
     case triangular
     /// A slab that narrows as it rises — modelled at its base extent here.
@@ -36,6 +41,8 @@ public enum PlanShape: String, Codable, Sendable, CaseIterable {
         case .uShaped: "U-shaped"
         case .cruciform: "Cruciform"
         case .circular: "Circular"
+        case .elliptical: "Elliptical"
+        case .curvedSlab: "Curved slab"
         case .octagonal: "Octagonal"
         case .triangular: "Triangular"
         case .setbackTower: "Setback tower"
@@ -47,7 +54,19 @@ public enum PlanShape: String, Codable, Sendable, CaseIterable {
     public var isIrregular: Bool {
         switch self {
         case .lShaped, .tShaped, .uShaped, .cruciform, .triangular: true
-        case .rectangular, .square, .circular, .octagonal, .setbackTower: false
+        case .rectangular, .square, .circular, .elliptical, .curvedSlab,
+             .octagonal, .setbackTower: false
+        }
+    }
+
+    /// Whether the plan is bounded by curves rather than straight walls.
+    ///
+    /// Used to decide how finely to tessellate it: a curve needs enough points
+    /// for the smoothing to have something to fit, and a rectangle needs four.
+    public var isCurved: Bool {
+        switch self {
+        case .circular, .elliptical, .curvedSlab: true
+        default: false
         }
     }
 
@@ -72,7 +91,17 @@ public enum PlanShape: String, Codable, Sendable, CaseIterable {
             return Self.rectangle(width: depth * ratio, depth: depth)
 
         case .circular:
-            return Self.regularPolygon(sides: 32, area: area)
+            return Self.regularPolygon(sides: 36, area: area)
+
+        case .elliptical:
+            // area = π·a·b with a = ratio·b, so b follows directly. Solving it
+            // rather than scaling a circle keeps the stated floor area exact,
+            // which matters because the floor area is the building's mass.
+            let semiMinor = (area / (.pi * ratio)).squareRoot()
+            return Self.ellipse(semiMajor: semiMinor * ratio, semiMinor: semiMinor, points: 40)
+
+        case .curvedSlab:
+            return Self.curvedSlab(area: area, ratio: ratio)
 
         case .octagonal:
             return Self.regularPolygon(sides: 8, area: area)
@@ -153,6 +182,12 @@ public enum PlanShape: String, Codable, Sendable, CaseIterable {
             (["l-shaped", "l shaped", "ell-shaped"], .lShaped),
             (["t-shaped", "t shaped"], .tShaped),
             (["u-shaped", "u shaped", "courtyard", "horseshoe"], .uShaped),
+            // Before `circular`, because "elliptical" and "oval" are the words
+            // people reach for when a tower is round but not a circle, and a
+            // description containing both should land on the more specific one.
+            (["elliptic", "oval", "lenticular", "lozenge", "lens-shaped"], .elliptical),
+            (["curved slab", "curved facade", "curved façade", "crescent", "bowed",
+              "arc-shaped", "banana"], .curvedSlab),
             (["circular", "cylindrical", "round tower", "rotunda", "drum"], .circular),
             (["octagon", "octagonal"], .octagonal),
             (["triangul", "wedge", "flatiron"], .triangular),
@@ -187,6 +222,65 @@ public enum PlanShape: String, Codable, Sendable, CaseIterable {
             let angle = 2 * .pi * Double(index) / n - .pi / 2
             return (radius * cos(angle), radius * sin(angle))
         })
+    }
+
+    /// An ellipse, sampled at `points` vertices.
+    ///
+    /// Sampled uniformly in the parameter rather than in arc length, which puts
+    /// the points closer together at the ends where the curvature is highest —
+    /// exactly where a curve fit needs them.
+    private static func ellipse(semiMajor: Double, semiMinor: Double,
+                                points: Int) -> [Coordinate2D] {
+        let n = max(points, 12)
+        return close((0..<n).map { index in
+            let angle = 2 * .pi * Double(index) / Double(n)
+            return (semiMajor * cos(angle), semiMinor * sin(angle))
+        })
+    }
+
+    /// A slab with one long face bowed out into a shallow arc.
+    ///
+    /// The shape of a great many apartment blocks and hotels, and one that has
+    /// a real structural consequence rather than a stylistic one: the bow moves
+    /// the plan's centroid away from the straight face, so the centre of mass
+    /// and the centre of the bracing no longer coincide and the building
+    /// twists as it sways.
+    private static func curvedSlab(area: Double, ratio: Double) -> [Coordinate2D] {
+        // Start from the rectangle of the requested proportions, then bow one
+        // side out and shrink the whole thing back to the stated area, so
+        // choosing a curved slab does not silently add floor area.
+        let depth = (area / ratio).squareRoot()
+        let width = depth * ratio
+        let halfWidth = width / 2
+        let bow = depth * 0.55
+
+        var ring: [(Double, Double)] = [(-halfWidth, -depth / 2), (halfWidth, -depth / 2)]
+        // The arc, from the right-hand end back to the left.
+        let steps = 28
+        for step in 0...steps {
+            let t = Double(step) / Double(steps)
+            let x = halfWidth - width * t
+            // A parabola rather than a circular arc: it meets the straight ends
+            // without a kink, which is what a bowed facade actually does.
+            ring.append((x, depth / 2 + bow * (1 - 4 * (t - 0.5) * (t - 0.5))))
+        }
+
+        let raw = close(ring)
+        // Rescale to the requested area.
+        let enclosed = shoelaceArea(raw)
+        guard enclosed > 1e-6 else { return rectangle(width: width, depth: depth) }
+        let scale = (area / enclosed).squareRoot()
+        return raw.map { Coordinate2D(x: $0.x * scale, y: $0.y * scale) }
+    }
+
+    private static func shoelaceArea(_ ring: [Coordinate2D]) -> Double {
+        guard ring.count >= 3 else { return 0 }
+        var sum = 0.0
+        for index in ring.indices {
+            let a = ring[index], b = ring[(index + 1) % ring.count]
+            sum += a.x * b.y - b.x * a.y
+        }
+        return abs(sum) / 2
     }
 
     private static func close(_ points: [(Double, Double)]) -> [Coordinate2D] {

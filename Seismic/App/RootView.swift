@@ -183,6 +183,14 @@ struct RootView: View {
             perform(command)
         }
         .onChange(of: env.latestAssessment?.id) { _, _ in announceAssessment() }
+        // Honours a navigation request made from inside a sheet, which has no
+        // other way to reach the tab bar. Cleared immediately so the same
+        // request cannot fire twice.
+        .onChange(of: env.requestedSection) { _, section in
+            guard let section else { return }
+            env.requestedSection = nil
+            show(section)
+        }
         .onChange(of: env.isPresentationMode) { _, isOn in
             if isOn {
                 director.start(environment: env) { section in show(section) }

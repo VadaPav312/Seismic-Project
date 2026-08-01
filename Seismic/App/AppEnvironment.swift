@@ -52,6 +52,18 @@ final class AppEnvironment: ObservableObject {
 
     @Published var selectedBuildingID: UUID?
 
+    /// A screen something has asked to be shown, cleared once the request has
+    /// been honoured.
+    ///
+    /// Navigation lives in `RootView`, which owns the tab selection — but the
+    /// things that want to navigate are often several levels down inside a
+    /// sheet, with no path back up to it. The Library's "Simulate" button was
+    /// exactly this: it selected the building, dismissed its own sheet, and
+    /// left the user looking at the Library wondering what had happened.
+    /// Routing the request through the one object every screen already has is
+    /// simpler than threading a callback through each of them.
+    @Published var requestedSection: AppSection?
+
     /// Live motion data, deliberately on its own object rather than published
     /// here. See `NodeStream` — publishing a 20 Hz stream from this object was
     /// re-rendering every screen in the app twenty times a second.

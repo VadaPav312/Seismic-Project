@@ -15,7 +15,6 @@ struct SimulatorScreen: View {
     @StateObject private var controller = BuildingSceneController()
     @StateObject private var runner = SimulationRunner()
 
-    @State private var selectedBuildingID: UUID?
     @State private var selectedRecordID: UUID?
     /// Starts collapsed so the building gets the whole screen. The controls are
     /// one tap away; a 3D view with half of it behind a panel is not.
@@ -37,9 +36,16 @@ struct SimulatorScreen: View {
     @State private var selectedMode = 1
     @State private var intensityScale: Double = 1.0
 
-    private var building: BuildingModel? {
-        env.buildings.first { $0.id == selectedBuildingID } ?? env.selectedBuilding
-    }
+    /// The building being shaken, which is the app's current building and not a
+    /// second copy of that choice.
+    ///
+    /// This screen used to keep its own `selectedBuildingID`, seeded once on
+    /// first appearance. Two stores of the same fact drift apart the moment
+    /// either is written: picking a building here left the rest of the app on
+    /// the old one, and choosing one anywhere else was ignored here. "Simulate"
+    /// in the Library wrote the shared value and this screen never read it
+    /// again, which is precisely why that button did nothing.
+    private var building: BuildingModel? { env.selectedBuilding }
 
     private var record: EarthquakeRecord? {
         env.earthquakes.first { $0.id == selectedRecordID } ?? env.earthquakes.first
@@ -77,14 +83,17 @@ struct SimulatorScreen: View {
             // keeps the recorder alive — for as long as the app runs.
             recorder.stopRecording()
         }
-        .onChange(of: selectedBuildingID) { _, _ in rebuild() }
+        // Follows the building wherever it was chosen — this screen's own
+        // picker, the Library's "Simulate", the designer's "Save", a voice
+        // command. One source, so all of them work.
+        .onChange(of: env.selectedBuildingID) { _, _ in rebuild() }
         .sheet(isPresented: $showsSweep) {
             if let building { ResonanceSweepView(building: building) }
         }
         .sheet(isPresented: $showsComparison) {
             if let record {
                 ComparisonView(record: record, candidates: env.buildings,
-                               initialLeft: selectedBuildingID)
+                               initialLeft: env.selectedBuildingID)
             }
         }
         .sheet(isPresented: $showingImageShare) {
@@ -107,7 +116,7 @@ struct SimulatorScreen: View {
     // MARK: Setup
 
     private func setUp() {
-        if selectedBuildingID == nil { selectedBuildingID = env.selectedBuilding?.id }
+        if env.selectedBuildingID == nil { env.selectedBuildingID = env.buildings.first?.id }
         if selectedRecordID == nil { selectedRecordID = env.earthquakes.first?.id }
         rebuild()
     }
@@ -163,6 +172,18 @@ struct SimulatorScreen: View {
                     Text(String(format: "t = %.1f s", runner.currentTime))
                         .font(Theme.Typography.numericSmall)
                         .foregroundStyle(Theme.Palette.accent)
+                }
+
+                // What the twist means, in the one number worth quoting. The
+                // building visibly rotates during a run and that would
+                // otherwise look like a rendering flourish rather than the
+                // measured consequence of its own plan.
+                if controller.torsion.cornerAmplification > 0.02 {
+                    overlayValue("Corner travels",
+                                 String(format: "+%.0f%%",
+                                        controller.torsion.cornerAmplification * 100),
+                                 controller.torsion.isTorsionallyIrregular
+                                    ? Theme.Palette.verdictAmber : Theme.Palette.textPrimary)
                 }
 
                 // The exaggeration must always be visible: a building visibly
@@ -267,7 +288,7 @@ struct SimulatorScreen: View {
                     ForEach(env.buildings) { candidate in
                         Button {
                             Haptics.shared.play(.selection)
-                            selectedBuildingID = candidate.id
+                            env.selectedBuildingID = candidate.id
                         } label: {
                             VStack(spacing: 3) {
                                 Image(systemName: candidate.thumbnailSystemImage)
@@ -284,7 +305,7 @@ struct SimulatorScreen: View {
                         .buttonStyle(SecondaryButtonStyle())
                         .overlay(
                             RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall)
-                                .strokeBorder(selectedBuildingID == candidate.id
+                                .strokeBorder(building?.id == candidate.id
                                               ? Theme.Palette.accent : .clear, lineWidth: 1.5))
                     }
                 }
@@ -340,7 +361,8 @@ struct SimulatorScreen: View {
                 Button {
                     runIt()
                 } label: {
-                    Label(runner.isRunning ? "Running…" : "Shake it",
+                    Label(runner.isRunning ? "Running…" : (runner.isPaused ? "Start again"
+                                                                           : "Shake it"),
                           systemImage: runner.isRunning ? "waveform" : "play.fill")
                         .font(Theme.Typography.headline)
                         .frame(maxWidth: .infinity)
@@ -348,6 +370,21 @@ struct SimulatorScreen: View {
                 }
                 .buttonStyle(PrimaryButtonStyle())
                 .disabled(runner.isRunning)
+
+                // Pause is where the simulator becomes useful rather than
+                // impressive: the interesting instant is the one where a storey
+                // crosses a drift threshold, and it goes past in a frame.
+                if runner.isRunning || runner.isPaused {
+                    Button {
+                        runner.togglePause()
+                        Haptics.shared.play(.selection)
+                    } label: {
+                        Image(systemName: runner.isPaused ? "play.fill" : "pause.fill")
+                            .frame(width: 52, height: Theme.Metrics.minimumTapTarget)
+                    }
+                    .buttonStyle(SecondaryButtonStyle())
+                    .accessibilityLabel(runner.isPaused ? "Resume" : "Pause")
+                }
 
                 Button {
                     runner.stop()
@@ -386,13 +423,27 @@ struct SimulatorScreen: View {
             Button {
                 runIt()
             } label: {
-                Label("Shake", systemImage: "play.fill")
+                Label(runner.isPaused ? "Restart" : "Shake", systemImage: "play.fill")
                     .font(Theme.Typography.callout)
                     .frame(maxWidth: .infinity)
                     .frame(height: 40)
             }
             .buttonStyle(PrimaryButtonStyle())
             .disabled(runner.isRunning)
+
+            // The collapsed bar is what the screen shows by default, so pause
+            // has to be reachable without expanding the panel first.
+            if runner.isRunning || runner.isPaused {
+                Button {
+                    runner.togglePause()
+                    Haptics.shared.play(.selection)
+                } label: {
+                    Image(systemName: runner.isPaused ? "play.fill" : "pause.fill")
+                        .frame(width: 44, height: 40)
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                .accessibilityLabel(runner.isPaused ? "Resume" : "Pause")
+            }
 
             if let result = runner.result {
                 Text(String(format: "%.2f%% drift", result.maximumDrift * 100))
@@ -638,8 +689,18 @@ final class SimulationRunner: ObservableObject {
     @Published private(set) var frame: Frame?
     @Published private(set) var result: SimulationResult?
     @Published private(set) var isRunning = false
+    /// Stopped part-way through, with the response still loaded.
+    ///
+    /// Distinct from simply not running: a paused run can be resumed from where
+    /// it stopped, scrubbed either way, and read off frame by frame — which is
+    /// the whole point of pausing at the instant a storey goes red.
+    @Published private(set) var isPaused = false
     @Published private(set) var currentTime: Double = 0
     @Published private(set) var duration: Double = 0
+
+    /// True once there is a solved response to play, whether or not it is
+    /// currently moving.
+    var hasResponse: Bool { result != nil }
 
     private var timer: Timer?
     private var index = 0
@@ -657,6 +718,7 @@ final class SimulationRunner: ObservableObject {
         thresholds = DriftThresholds.forSystem(building.system, material: building.material)
         result = nil
         frame = nil
+        isPaused = false
         currentTime = 0
         duration = 0
     }
@@ -695,9 +757,34 @@ final class SimulationRunner: ObservableObject {
         }
     }
 
+    /// Holds the building where it is, mid-event.
+    ///
+    /// Only the clock stops. The solved response is untouched, so resuming
+    /// carries on from the same step rather than re-solving — and the frame
+    /// left on screen stays exactly as it was, which is what makes it possible
+    /// to look at the moment a storey turned red instead of watching it go by.
+    func pause() {
+        guard isRunning else { return }
+        timer?.invalidate()
+        timer = nil
+        isRunning = false
+        isPaused = true
+    }
+
+    func resume() {
+        guard isPaused, let result, index < result.times.count else { return }
+        isPaused = false
+        isRunning = true
+        startPlayback()
+    }
+
+    /// Resumes if paused, pauses if running. What the one button does.
+    func togglePause() { isPaused ? resume() : pause() }
+
     private func advance() {
         guard let result, index < result.times.count else {
             isRunning = false
+            isPaused = false          // reached the end; there is nothing to resume
             timer?.invalidate()
             return
         }
@@ -716,12 +803,17 @@ final class SimulationRunner: ObservableObject {
         let displacements = index < result.displacement.count ? result.displacement[index] : []
         let drifts = index < result.drift.count ? result.drift[index] : []
         frame = Frame(displacements: displacements, drifts: drifts, shakingIntensity: 0)
+        // Dragging the scrubber on a finished run leaves it ready to play on
+        // from there, rather than stranded with a Resume button that does
+        // nothing.
+        if !isRunning, index < result.times.count - 1 { isPaused = true }
     }
 
     func stop() {
         timer?.invalidate()
         timer = nil
         isRunning = false
+        isPaused = false
         index = 0
         currentTime = 0
     }
