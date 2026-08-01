@@ -22,10 +22,14 @@ struct SeismicApp: App {
                 .preferredColorScheme(.dark)
                 .task { await environment.bootstrap() }
                 // Coming back to the foreground is the most reliable moment to
-                // find both a network and a queue with something in it.
+                // find both a network and a queue with something in it — and
+                // the only moment at which a permission the user just changed
+                // in iOS Settings can be noticed, since nothing tells an app
+                // that its notification authorisation was revoked.
                 .onChange(of: scenePhase) { _, phase in
                     guard phase == .active else { return }
                     Task { await environment.sync.sync() }
+                    Task { await notifications.refreshAuthorisation() }
                 }
         }
     }

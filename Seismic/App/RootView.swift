@@ -1,6 +1,7 @@
 import SwiftUI
 import SeismicCore
 import SeismicServices
+import SeismicStructures
 
 /// The top-level destinations.
 enum AppSection: String, CaseIterable, Identifiable, Hashable {
@@ -264,11 +265,36 @@ struct RootView: View {
     /// The notification that goes out when a verdict lands. Sent from here
     /// because the notification centre is a view-layer concern — the assessment
     /// itself is computed whether or not anybody is allowed to be told.
+    /// The second and last place permission is asked for. Somebody who used the
+    /// introduction's escape hatches can reach a real verdict without ever
+    /// having been asked, and a verdict is the most self-explanatory reason
+    /// there is. `requestAuthorisationIfUndecided` makes this a no-op once the
+    /// question has been answered either way, so this is not a nag.
     private func announceAssessment() {
         guard let assessment = env.latestAssessment,
               let building = env.selectedBuilding,
               Date().timeIntervalSince(assessment.createdAt) < 60 else { return }
-        notifications.announceAssessment(assessment, buildingName: building.name)
+        Task {
+            await notifications.requestAuthorisationIfUndecided()
+            notifications.announceAssessment(assessment, buildingName: building.name)
+
+            // A verdict is also the moment the other two notifications become
+            // meaningful: an event has just happened, so there is now a reason
+            // to wait before going back in, and a reason to want to know where
+            // everybody is. Both are sent from here rather than from the
+            // screens that display the same information, because a user who
+            // never opens those screens is exactly the user who needs telling.
+            let guidance = AftershockForecast.reentryGuidance(
+                mainshockMagnitude: 6.4, verdict: assessment.verdict)
+            notifications.scheduleAftershockAdvice(
+                afterHours: guidance.recommendedWaitHours,
+                headline: "\(building.name): the aftershock risk has dropped",
+                detail: guidance.detail)
+
+            for member in services.household?.membersUnaccountedFor ?? [] {
+                notifications.askHouseholdToCheckIn(memberName: member.displayName)
+            }
+        }
     }
 
     private var mainInterface: some View {

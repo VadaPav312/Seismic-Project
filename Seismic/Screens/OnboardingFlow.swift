@@ -329,6 +329,7 @@ private struct ConnectionStep: View {
 private struct FirstMeasurementStep: View {
     @EnvironmentObject private var node: NodeStream
     @EnvironmentObject private var env: AppEnvironment
+    @EnvironmentObject private var notifications: NotificationCentre
     @State private var stage = 0
 
     var body: some View {
@@ -371,9 +372,32 @@ private struct FirstMeasurementStep: View {
                                  message: "That change is exactly what real damage produces, and "
                                     + "it is why the assessment moved. Nothing about the "
                                     + "building's appearance changed — only its rhythm.")
+
+                    if notifications.authorisation == .denied {
+                        InlineNotice(
+                            level: .warning,
+                            title: "Notifications are switched off",
+                            message: "A verdict like that one is worth being told about, and the "
+                                + "earthquake warning is worth being woken for. Both need "
+                                + "permission this app cannot ask for twice.",
+                            actionTitle: "Open Settings",
+                            action: {
+                                if let url = URL(string: UIApplication.openSettingsURLString) {
+                                    UIApplication.shared.open(url)
+                                }
+                            })
+                    }
                 }
             }
             .padding(Theme.Metrics.spacingSection)
+        }
+        // The permission prompt, asked here and nowhere earlier. The user has
+        // just watched a verdict change on their own building, so "may we tell
+        // you when this happens for real" answers itself — which is the whole
+        // difference between this moment and the launch screen.
+        .onChange(of: stage) { _, newStage in
+            guard newStage >= 3 else { return }
+            Task { await notifications.requestAuthorisationIfUndecided() }
         }
     }
 

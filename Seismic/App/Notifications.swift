@@ -85,6 +85,23 @@ final class NotificationCentre: NSObject, ObservableObject {
         hasCriticalAlerts = settings.criticalAlertSetting == .enabled
     }
 
+    /// Asks only if the system has never asked before.
+    ///
+    /// This is what the app calls at the two moments the reason is obvious —
+    /// the end of the first assessment in the introduction, and the arrival of
+    /// the first real verdict. Both can happen more than once and either can
+    /// happen first, so the decision of *whether* to prompt belongs here rather
+    /// than being duplicated at each call site. Once the user has answered,
+    /// `.denied` and `.authorized` both mean "do not ask again": iOS shows the
+    /// system prompt exactly once, and re-requesting after a denial returns
+    /// false silently, which would leave a caller believing it had asked.
+    @discardableResult
+    func requestAuthorisationIfUndecided() async -> Bool {
+        await refreshAuthorisation()
+        guard authorisation == .notDetermined else { return authorisation == .authorized }
+        return await requestAuthorisation()
+    }
+
     /// Asked for at a moment when the reason is obvious — after the first
     /// assessment, not on the launch screen. A permission prompt shown before
     /// the user knows what the app does is a permission prompt that gets denied.
