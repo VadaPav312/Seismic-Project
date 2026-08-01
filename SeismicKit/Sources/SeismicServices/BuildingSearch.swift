@@ -334,17 +334,26 @@ struct OverpassClient: Sendable {
     let endpoint: URL
 
     static func query(latitude: Double, longitude: Double, radius: Int = 60) -> String {
+        // `building:part` comes back alongside the outlines. Those parts are
+        // how OpenStreetMap records that a building is a tower on a podium
+        // rather than a prism — each carries its own height and the level it
+        // starts at — and they are the only free source of a real massing
+        // profile there is. Fetching them in the same round trip costs nothing
+        // extra and is what turns an imported skyscraper from a box into its
+        // actual shape.
         """
-        [out:json][timeout:20];
+        [out:json][timeout:25];
         (
           way["building"](around:\(radius),\(latitude),\(longitude));
           relation["building"](around:\(radius),\(latitude),\(longitude));
+          way["building:part"](around:\(radius),\(latitude),\(longitude));
+          relation["building:part"](around:\(radius),\(latitude),\(longitude));
         );
         out tags geom;
         """
     }
 
-    func facts(latitude: Double, longitude: Double,
+    func facts(latitude: Double, longitude: Double, name: String = "",
                client: ResilientClient) async throws -> (BuildingFactSet, [Coordinate2D]) {
         let body = Self.query(latitude: latitude, longitude: longitude)
         let request = HTTPRequest(method: "POST", url: endpoint,
@@ -352,7 +361,24 @@ struct OverpassClient: Sendable {
                                             "User-Agent": "Seismic/1.0 (structural safety app)"],
                                   body: Data(body.utf8), timeout: 25)
         let response: OverpassResponse = try await client.json(request, as: OverpassResponse.self)
-        guard let element = response.elements.first else { throw ServiceError.emptyResult }
+
+        // Everything within the search radius, projected once.
+        let projected = response.elements.map { element in
+            (element: element,
+             ring: Self.localFootprint(element.outerGeometry,
+                                       originLatitude: latitude, originLongitude: longitude))
+        }
+
+        let outlines = projected.filter { $0.element.tags?["building"] != nil }
+        let parts = projected.filter {
+            $0.element.tags?["building"] == nil && $0.element.tags?["building:part"] != nil
+        }
+
+        guard let chosen = Self.best(of: outlines, named: name) else {
+            throw ServiceError.emptyResult
+        }
+        let element = chosen.element
+        let footprint = chosen.ring
 
         var set = BuildingFactSet()
         let provenance = FactProvenance(source: .openStreetMap, confidence: 0.7,
@@ -388,8 +414,6 @@ struct OverpassClient: Sendable {
                                                  provenance: provenance)
         }
 
-        let footprint = Self.localFootprint(element.geometry ?? [],
-                                            originLatitude: latitude, originLongitude: longitude)
         if !footprint.isEmpty {
             let area = Self.polygonArea(footprint)
             if area > 10 {
@@ -400,7 +424,218 @@ struct OverpassClient: Sendable {
                                                retrievedAt: Date()))
             }
         }
+
+        // The massing, from the parts that sit inside the chosen outline.
+        let mine = parts.filter { !$0.ring.isEmpty && Self.centroid($0.ring).map {
+            Self.contains(footprint, $0)
+        } ?? false }
+        if let profile = Self.massing(fromParts: mine.map {
+            (ring: $0.ring, levels: Self.levels(of: $0.element.tags ?? [:]))
+        }, baseArea: Self.polygonArea(footprint)),
+           let encoded = try? JSONEncoder().encode(profile),
+           let json = String(data: encoded, encoding: .utf8) {
+            set.facts["massing"] = RetrievedFact(
+                field: "massing", value: json,
+                provenance: FactProvenance(
+                    source: .openStreetMap, confidence: 0.85,
+                    detail: "Built from \(mine.count) mapped building parts, each with its own "
+                        + "height — this is the building's real profile, not a guess at it",
+                    retrievedAt: Date()))
+        }
+
         return (set, footprint)
+    }
+
+    // MARK: Choosing the right building
+
+    /// Which of the buildings near the point is *the* building.
+    ///
+    /// The query returns everything within sixty metres, which in a city centre
+    /// is a dozen buildings. Taking the first — which is what this did — meant
+    /// importing whichever one the server happened to list first, so a search
+    /// for a named tower could come back with the outline of the shop next
+    /// door. That single line was the largest single cause of an imported
+    /// building not looking like the building.
+    ///
+    /// The tests are applied in order of how much they prove:
+    ///
+    /// 1. **The name matches.** Decisive when it happens. A building that says
+    ///    it is the one you asked for is the one you asked for.
+    /// 2. **It contains the point.** The coordinate came from Wikidata or a
+    ///    geocoder and lands inside the right building far more often than not.
+    /// 3. **It is the largest.** A last resort, and a fair one: the reason a
+    ///    building has a Wikidata entry is usually that it is the big one.
+    static func best(of candidates: [(element: OverpassResponse.Element, ring: [Coordinate2D])],
+                     named name: String) -> (element: OverpassResponse.Element,
+                                             ring: [Coordinate2D])? {
+        let usable = candidates.filter { $0.ring.count >= 3 }
+        guard !usable.isEmpty else { return candidates.first }
+
+        let wanted = normalise(name)
+        if !wanted.isEmpty {
+            let named = usable.filter { candidate in
+                let tags = candidate.element.tags ?? [:]
+                // `name:en` as well as `name`, because the local-language name
+                // is what OSM carries for most of the world and the search term
+                // will not have been in it.
+                return [tags["name"], tags["name:en"], tags["official_name"], tags["alt_name"]]
+                    .compactMap { $0 }
+                    .contains { matches(normalise($0), wanted) }
+            }
+            // Still the largest among them: a named complex often has its
+            // entrance pavilion tagged with the same name as the tower.
+            if let match = named.max(by: { polygonArea($0.ring) < polygonArea($1.ring) }) {
+                return match
+            }
+        }
+
+        // The origin is the projection's own centre, so the point being tested
+        // for is (0, 0) by construction.
+        let containing = usable.filter { contains($0.ring, Coordinate2D(x: 0, y: 0)) }
+        if let inside = containing.max(by: { polygonArea($0.ring) < polygonArea($1.ring) }) {
+            return inside
+        }
+
+        return usable.max(by: { polygonArea($0.ring) < polygonArea($1.ring) })
+    }
+
+    /// Case, accents, punctuation and the noise words that make two spellings
+    /// of the same building look different.
+    static func normalise(_ raw: String) -> String {
+        raw.folding(options: [.diacriticInsensitive, .caseInsensitive], locale: nil)
+            .replacingOccurrences(of: "[^a-z0-9 ]", with: " ", options: .regularExpression)
+            .split(separator: " ")
+            .filter { !["the", "of", "de", "la", "le", "building", "tower"].contains(String($0)) }
+            .joined(separator: " ")
+    }
+
+    /// Whether two normalised names refer to the same thing.
+    ///
+    /// Containment either way rather than equality, because OSM's name is
+    /// routinely longer than the search term ("Willis Tower" against "Willis
+    /// Tower (Sears Tower)") and occasionally shorter.
+    static func matches(_ a: String, _ b: String) -> Bool {
+        guard !a.isEmpty, !b.isEmpty else { return false }
+        return a == b || a.contains(b) || b.contains(a)
+    }
+
+    /// Ray casting. True when the point is inside the ring.
+    static func contains(_ ring: [Coordinate2D], _ point: Coordinate2D) -> Bool {
+        guard ring.count >= 3 else { return false }
+        var inside = false
+        var j = ring.count - 1
+        for i in ring.indices {
+            let a = ring[i], b = ring[j]
+            if (a.y > point.y) != (b.y > point.y),
+               point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x {
+                inside.toggle()
+            }
+            j = i
+        }
+        return inside
+    }
+
+    static func centroid(_ ring: [Coordinate2D]) -> Coordinate2D? {
+        guard ring.count >= 3 else { return nil }
+        var area = 0.0, x = 0.0, y = 0.0
+        for index in ring.indices {
+            let a = ring[index], b = ring[(index + 1) % ring.count]
+            let cross = a.x * b.y - b.x * a.y
+            area += cross
+            x += (a.x + b.x) * cross
+            y += (a.y + b.y) * cross
+        }
+        guard abs(area) > 1e-9 else { return nil }
+        return Coordinate2D(x: x / (3 * area), y: y / (3 * area))
+    }
+
+    // MARK: Massing from mapped parts
+
+    /// The vertical extent of one part, metres above ground.
+    ///
+    /// `height` and `min_height` where they exist, falling back to storey
+    /// counts at a typical floor-to-floor. A part with neither is not usable
+    /// and returns nil rather than being assumed to span the whole building —
+    /// which would flatten the very profile it was fetched to establish.
+    static func levels(of tags: [String: String]) -> (bottom: Double, top: Double)? {
+        func metres(_ key: String) -> Double? {
+            guard let raw = tags[key] else { return nil }
+            let numeric = raw.filter { $0.isNumber || $0 == "." }
+            return numeric.isEmpty ? nil : Double(numeric)
+        }
+        func storeys(_ key: String) -> Double? {
+            metres(key).map { $0 * 3.4 }
+        }
+
+        let top = metres("height") ?? storeys("building:levels")
+        guard let top, top > 0.5 else { return nil }
+        let bottom = metres("min_height") ?? storeys("building:min_level") ?? 0
+        guard top > bottom else { return nil }
+        return (bottom, top)
+    }
+
+    /// A massing profile from the parts a building has been mapped in.
+    ///
+    /// The plan area at any height is the total area of the parts that span it,
+    /// and the profile is that area relative to the base, as a linear scale —
+    /// so it is the square root, because a tower at half the plan width has a
+    /// quarter of the floor area and therefore a quarter of the mass.
+    ///
+    /// Each boundary gets two stations a hair apart, so a setback comes out as
+    /// the ledge it is rather than a chamfer. That distinction is structural:
+    /// an abrupt change in plan is an abrupt change in stiffness, and demand
+    /// concentrates exactly where it happens.
+    static func massing(fromParts parts: [(ring: [Coordinate2D],
+                                           levels: (bottom: Double, top: Double)?)],
+                        baseArea: Double) -> Massing? {
+        let usable = parts.compactMap { part -> (area: Double, bottom: Double, top: Double)? in
+            guard let levels = part.levels else { return nil }
+            let area = polygonArea(part.ring)
+            guard area > 5 else { return nil }
+            return (area, levels.bottom, levels.top)
+        }
+        // One part is just the building again, and says nothing a prism does
+        // not already say.
+        guard usable.count >= 2 else { return nil }
+
+        let total = usable.map(\.top).max() ?? 0
+        guard total > 3 else { return nil }
+
+        func area(at height: Double) -> Double {
+            usable.filter { $0.bottom <= height && height < $0.top }
+                .reduce(0) { $0 + $1.area }
+        }
+
+        let ground = max(area(at: 0.01), baseArea * 0.2, 1)
+
+        // Every level at which some part starts or stops, which is where the
+        // plan can actually change.
+        var boundaries = Set<Double>([0, total])
+        for part in usable {
+            boundaries.insert(part.bottom)
+            boundaries.insert(part.top)
+        }
+
+        var stations: [Massing.Station] = []
+        for boundary in boundaries.sorted() {
+            let fraction = min(max(boundary / total, 0), 1)
+            // Just below the boundary keeps the plan that was there; at it,
+            // the new one.
+            let below = (area(at: boundary - 0.05) / ground).squareRoot()
+            let above = (area(at: boundary + 0.05) / ground).squareRoot()
+            if fraction > 0 {
+                stations.append(.init(heightFraction: max(fraction - 0.002, 0), scale: below))
+            }
+            if fraction < 1 {
+                stations.append(.init(heightFraction: fraction, scale: above))
+            }
+        }
+        guard stations.count >= 2 else { return nil }
+
+        let profile = Massing(stations: stations)
+        // A profile that says the building is a prism is not worth carrying;
+        // the default already says that, and more cheaply.
+        return profile.isUniform ? nil : profile
     }
 
     /// Projects the lat/lon ring onto a local metres plane centred on the
@@ -438,11 +673,84 @@ struct OverpassClient: Sendable {
 
 struct OverpassResponse: Decodable {
     struct Point: Decodable { var lat: Double; var lon: Double }
-    struct Element: Decodable {
-        var tags: [String: String]?
+
+    /// One way inside a relation.
+    struct Member: Decodable {
+        var type: String?
+        var role: String?
         var geometry: [Point]?
     }
+
+    struct Element: Decodable {
+        var type: String?
+        var tags: [String: String]?
+        /// Present on ways. Relations carry their geometry on their members.
+        var geometry: [Point]?
+        var members: [Member]?
+
+        /// The outline to use, whichever kind of element this is.
+        ///
+        /// Large and interesting buildings are mapped as multipolygon
+        /// relations rather than as single ways — anything with a courtyard
+        /// has to be, because a hole needs an inner ring. Reading only
+        /// `geometry` returned nothing at all for those, so precisely the
+        /// buildings somebody would go looking for were the ones that fell
+        /// back to a generated rectangle.
+        ///
+        /// Inner rings are dropped rather than modelled: a courtyard is a hole
+        /// in the floor plate, and the extruder takes a single ring. The outer
+        /// boundary is still enormously closer to the truth than a box, and
+        /// the enclosed area is corrected separately from the tags.
+        var outerGeometry: [Point] {
+            if let geometry, geometry.count >= 3 { return geometry }
+            guard let members else { return [] }
+            let outers = members.filter { ($0.role ?? "outer") == "outer" }
+                .compactMap(\.geometry)
+                .filter { $0.count >= 2 }
+            guard !outers.isEmpty else { return [] }
+            return OverpassResponse.stitch(outers)
+        }
+    }
+
     var elements: [Element]
+
+    /// Joins a relation's outer ways into one ring.
+    ///
+    /// The ways arrive in no particular order and in either direction, which is
+    /// how OSM stores them — the relation says which ways bound the building,
+    /// not how to walk them. Each is appended to whichever end it meets,
+    /// reversed if that is the end that matches. Anything that cannot be joined
+    /// is left out rather than concatenated blindly, which would produce a ring
+    /// that jumps across the building.
+    static func stitch(_ ways: [[Point]]) -> [Point] {
+        var remaining = ways
+        guard var ring = remaining.popLast() else { return [] }
+
+        func near(_ a: Point, _ b: Point) -> Bool {
+            abs(a.lat - b.lat) < 1e-7 && abs(a.lon - b.lon) < 1e-7
+        }
+
+        var joinedSomething = true
+        while joinedSomething, !remaining.isEmpty {
+            joinedSomething = false
+            for (index, way) in remaining.enumerated() {
+                guard let first = way.first, let last = way.last,
+                      let ringStart = ring.first, let ringEnd = ring.last else { continue }
+
+                if near(ringEnd, first) { ring.append(contentsOf: way.dropFirst()) }
+                else if near(ringEnd, last) { ring.append(contentsOf: way.reversed().dropFirst()) }
+                else if near(ringStart, last) { ring.insert(contentsOf: way.dropLast(), at: 0) }
+                else if near(ringStart, first) {
+                    ring.insert(contentsOf: way.reversed().dropLast(), at: 0)
+                } else { continue }
+
+                remaining.remove(at: index)
+                joinedSomething = true
+                break
+            }
+        }
+        return ring
+    }
 }
 
 /// Serper — Google results as JSON. The broadest recall of the keyed providers,
@@ -958,7 +1266,8 @@ public actor BuildingSearchService {
         if let latitude = candidate.latitude, let longitude = candidate.longitude,
            let endpoint = vault.value(for: .overpassEndpoint).flatMap(URL.init(string:)),
            let (set, footprint) = try? await OverpassClient(endpoint: endpoint)
-               .facts(latitude: latitude, longitude: longitude, client: client) {
+               .facts(latitude: latitude, longitude: longitude,
+                      name: candidate.name, client: client) {
             merged.merge(set)
             if !footprint.isEmpty, let encoded = try? JSONEncoder().encode(footprint) {
                 merged.facts["footprint"] = RetrievedFact(
@@ -989,8 +1298,16 @@ public actor BuildingSearchService {
 
         // How the form changes with height. Needs the storey count, so it runs
         // after the other sources have had their say.
+        //
+        // Skipped outright when OpenStreetMap has already given a profile built
+        // from mapped building parts. That profile came from somebody who
+        // measured the building; this one is inferred from prose and, for the
+        // handful of famous towers it knows by name, from a table. A described
+        // massing must never overwrite a surveyed one — the same rule the
+        // footprint follows a few lines above.
         let storeys = Int(merged.facts["storeyCount"]?.value ?? "") ?? 0
-        if let form = await massing(for: candidate, facts: merged, storeys: storeys),
+        if merged.facts["massing"] == nil,
+           let form = await massing(for: candidate, facts: merged, storeys: storeys),
            let encoded = try? JSONEncoder().encode(form.massing),
            let json = String(data: encoded, encoding: .utf8) {
             merged.facts["massing"] = RetrievedFact(
