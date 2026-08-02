@@ -27,7 +27,14 @@ public enum SeedLibrary {
                 name: "Transamerica Pyramid",
                 address: "600 Montgomery St, San Francisco, California",
                 latitude: 37.7952, longitude: -122.4028,
-                storeys: 48, height: 260, footprintArea: 1100,
+                // A square base of about 53 m a side, tapering to a top office
+                // floor of roughly 2,500 sq ft against 21,000 at the fifth —
+                // an area ratio of 0.12, so a linear scale of about 0.34.
+                // Checked against the published gross floor area: a linear
+                // taper over 48 floors integrates to 0.49 of the base plan,
+                // which puts the total at 71,000 m². The published figure is
+                // 70,900.
+                storeys: 48, height: 260, footprintArea: 2800,
                 year: 1972, material: .steel, system: .bracedFrame,
                 foundation: .matSlab, soil: .denseSoil, retrofit: .partial,
                 architect: "William Pereira",
@@ -36,13 +43,18 @@ public enum SeedLibrary {
                     + "though the top reportedly swayed nearly a foot for over a minute.",
                 events: ["1989 Loma Prieta — no structural damage"],
                 image: "triangle",
-                plan: .square),
+                plan: .square,
+                massing: .tapered(topScale: 0.31)),
 
             building(
                 name: "Tokyo Skytree",
                 address: "1 Chome-1-2 Oshiage, Sumida City, Tokyo",
                 latitude: 35.7101, longitude: 139.8107,
-                storeys: 29, height: 634, footprintArea: 3600,
+                // An equilateral triangle of 68 m a side is 2,000 m², not the
+                // 3,600 previously carried here. The tower then narrows hard
+                // and turns circular by 300 m; the shaft at the upper
+                // observatory is a fraction of the base.
+                storeys: 29, height: 634, footprintArea: 2000,
                 year: 2012, material: .steel, system: .dualSystem,
                 foundation: .piled, soil: .stiffSoil, retrofit: .none,
                 architect: "Nikken Sekkei",
@@ -52,13 +64,34 @@ public enum SeedLibrary {
                     + "collapsed in an earthquake.",
                 events: ["2011 Tōhoku — under construction, undamaged"],
                 image: "antenna.radiowaves.left.and.right",
-                plan: .triangular),
+                // Triangular is right at the base, which is where the stiffness
+                // that matters lives, and the app's plan is one shape for the
+                // whole height. The taper is the part that was badly wrong: a
+                // uniform 634 m triangular prism is not a tower, it is a wall.
+                plan: .triangular,
+                // Concave, not a straight cone. The Skytree narrows hard over
+                // its first hundred and fifty metres and then runs on as a
+                // nearly constant shaft — the hyperboloid profile it borrows
+                // from a pagoda's silhouette. A straight taper between the same
+                // two ends is a recognisably different building.
+                massing: Massing(stations: [
+                    .init(heightFraction: 0, scale: 1),
+                    .init(heightFraction: 0.10, scale: 0.72),
+                    .init(heightFraction: 0.25, scale: 0.50),
+                    .init(heightFraction: 0.45, scale: 0.36),
+                    .init(heightFraction: 0.70, scale: 0.28),
+                    .init(heightFraction: 1, scale: 0.18),
+                ])),
 
             building(
                 name: "Torre Latinoamericana",
                 address: "Eje Central Lázaro Cárdenas 2, Mexico City",
                 latitude: 19.4339, longitude: -99.1409,
-                storeys: 44, height: 166, footprintArea: 1200,
+                // 27,727 m² of floor over 44 floors is about 630 m² a floor —
+                // a tower roughly 25 m square, not the 1,200 m² carried here.
+                // The lowest floors are wider, so the base plan is taken a
+                // little above the average.
+                storeys: 44, height: 166, footprintArea: 760,
                 year: 1956, material: .steel, system: .momentFrame,
                 foundation: .piled, soil: .softSoil, retrofit: .partial,
                 architect: "Augusto H. Álvarez",
@@ -68,13 +101,26 @@ public enum SeedLibrary {
                     + "second resonance of the soft soil that killed the mid-rise buildings.",
                 events: ["1957 Guerrero — undamaged", "1985 Michoacán — undamaged",
                          "2017 Puebla — undamaged"],
-                image: "building.columns"),
+                image: "building.columns",
+                plan: .square,
+                // A wider base for the first few floors, then a uniform shaft,
+                // then the top floors stepping in under the mast — which is the
+                // profile in every photograph of it.
+                massing: Massing(stations: [
+                    .init(heightFraction: 0, scale: 1),
+                    .init(heightFraction: 0.08, scale: 1),
+                    .init(heightFraction: 0.082, scale: 0.87),
+                    .init(heightFraction: 0.88, scale: 0.87),
+                    .init(heightFraction: 0.882, scale: 0.62),
+                    .init(heightFraction: 1, scale: 0.62),
+                ])),
 
             building(
                 name: "Salesforce Tower",
                 address: "415 Mission St, San Francisco, California",
                 latitude: 37.7897, longitude: -122.3972,
-                storeys: 61, height: 326, footprintArea: 2400,
+                // Published floor plates are 25,000 sq ft, which is 2,320 m².
+                storeys: 61, height: 326, footprintArea: 2320,
                 year: 2018, material: .reinforcedConcrete, system: .dualSystem,
                 foundation: .piled, soil: .stiffSoil, retrofit: .none,
                 architect: "Pelli Clarke Pelli",
@@ -83,7 +129,12 @@ public enum SeedLibrary {
                     + "rather than merely to avoid collapse — a much higher bar.",
                 events: [],
                 image: "building.2",
-                plan: .square),
+                plan: .square,
+                // A gentle continuous taper rather than a pyramid: the
+                // silhouette narrows the whole way up, which is what makes it
+                // read as tall from across the bay. Nothing like the
+                // Transamerica's slope, but not a prism either.
+                massing: .tapered(topScale: 0.7)),
 
             building(
                 name: "Christchurch Arts Centre",
@@ -188,7 +239,17 @@ public enum SeedLibrary {
         // away from the centre of rigidity twists a building rather than
         // pushing it.
         plan: PlanShape = .rectangular,
-        aspectRatio: Double = 1.6
+        aspectRatio: Double = 1.6,
+        // How the plan changes with height.
+        //
+        // This parameter did not exist, so every seeded building was a prism
+        // regardless of what it actually looks like — and the Transamerica
+        // Pyramid, which is the example `Massing` itself cites as the reason it
+        // was written, came out a square box. The massing is not decoration
+        // either: a taper puts mass low and reduces the overturning moment at
+        // the base, and a podium concentrates demand at the storey where the
+        // plan drops. Both change the answer, not just the picture.
+        massing: Massing = .uniform
     ) -> BuildingModel {
         // Every seeded fact carries a source, exactly as an imported one does.
         var provenance: [String: FactProvenance] = [:]
@@ -206,10 +267,17 @@ public enum SeedLibrary {
                                             detail: "Regional site class; not a site-specific investigation")
         provenance["foundation"] = FactProvenance(source: .aiInference)
 
+        if !massing.isUniform {
+            provenance["massing"] = FactProvenance(
+                source: .webSearch,
+                detail: "From the building's published floor-plate areas at base and top")
+        }
+
         return BuildingModel(
             name: name, address: address, latitude: latitude, longitude: longitude,
             storeyCount: storeys, height: height, footprintArea: footprintArea,
             footprint: plan.polygon(area: footprintArea, aspectRatio: aspectRatio),
+            massing: massing,
             yearBuilt: year, material: material, system: system, foundation: foundation,
             soil: soil, retrofit: retrofit, architect: architect, notes: notes,
             notableEvents: events, provenance: provenance,
@@ -526,7 +594,7 @@ public enum SeedLibrary {
         let streets = ["Mission", "Valencia", "Guerrero", "Dolores", "Church", "Sanchez",
                        "Noe", "Castro", "Diamond", "Douglass", "Hoffman", "Grand View"]
 
-        for index in 0..<count {
+        for _ in 0..<count {
             // Verdicts are not uniformly distributed: most buildings are fine.
             let roll = rng.uniform()
             let verdict: SafetyVerdict = switch roll {

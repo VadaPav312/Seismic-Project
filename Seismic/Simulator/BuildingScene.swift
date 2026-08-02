@@ -242,15 +242,25 @@ final class BuildingSceneController: ObservableObject {
         // which is enough to make the massing legible without modelling columns.
         let container = SCNNode()
 
-        let bodyNode = storeyNode(height: height * 0.86, inset: 0,
+        // A floor line, not a tray.
+        //
+        // The slab used to stand 4% proud of the body and the two together
+        // covered only 96% of the storey height, so every building came out as
+        // a stack of loose plates with air between them — on a 53 m wide base
+        // that overhang is more than two metres a side. Real floor slabs are
+        // flush with the facade; what you see banding a real tower is the
+        // spandrel, which is a line and not a ledge. On a tapered building the
+        // overhang was worse than untidy: it turned a smooth slope into a
+        // visible staircase.
+        let bodyNode = storeyNode(height: height * 0.93, inset: 0,
                                   width: width, depth: depth, planScale: planScale)
         bodyNode.name = "body"
         container.addChildNode(bodyNode)
 
-        let slabNode = storeyNode(height: height * 0.10, inset: -0.04,
+        let slabNode = storeyNode(height: height * 0.07, inset: -0.005,
                                   width: width, depth: depth, planScale: planScale)
         slabNode.name = "slab"
-        slabNode.position = SCNVector3(0, Float(height * 0.46), 0)
+        slabNode.position = SCNVector3(0, Float(height * 0.465), 0)
         container.addChildNode(slabNode)
 
         container.name = "storey-\(index + 1)"
@@ -317,9 +327,23 @@ final class BuildingSceneController: ObservableObject {
         guard ring.count >= 3 else { return nil }
 
         let box = Polygon.boundingBox(ring)
-        let centreX = (box.min.x + box.max.x) / 2
-        let centreY = (box.min.y + box.max.y) / 2
         guard box.max.x - box.min.x > 0.5, box.max.y - box.min.y > 0.5 else { return nil }
+
+        // Centred on the plan's centroid, not on its bounding box.
+        //
+        // Each storey is this same outline multiplied by the massing scale, so
+        // whatever point the path is centred on is the point the tower is
+        // stacked about. Those coincide for a rectangle or a circle, and for a
+        // triangle they are nearly ten metres apart — so every storey of the
+        // Tokyo Skytree was drawn with its centre of area displaced by ten
+        // metres times that storey's scale, and since the scale shrinks with
+        // height, the displacement shrank with it. The tower leaned.
+        //
+        // The centroid is also the structurally right choice: floors stack
+        // about their centres of mass.
+        let centre = centroid(of: ring)
+        let centreX = centre.x
+        let centreY = centre.y
 
         // The polygon's y is a ground-plane axis; the extrusion happens along
         // the shape's own z, and the node is rotated flat by the caller.
@@ -349,6 +373,26 @@ final class BuildingSceneController: ObservableObject {
         // count.
         path.flatness = 0.02
         return path
+    }
+
+    /// Area centroid of a closed ring, by the shoelace formula.
+    ///
+    /// Falls back to the bounding-box centre for a degenerate outline, where
+    /// the signed area is zero and the centroid is undefined.
+    private func centroid(of ring: [Coordinate2D]) -> (x: Double, y: Double) {
+        var area = 0.0, x = 0.0, y = 0.0
+        for index in ring.indices {
+            let a = ring[index], b = ring[(index + 1) % ring.count]
+            let cross = a.x * b.y - b.x * a.y
+            area += cross
+            x += (a.x + b.x) * cross
+            y += (a.y + b.y) * cross
+        }
+        guard abs(area) > 1e-9 else {
+            let box = Polygon.boundingBox(ring)
+            return ((box.min.x + box.max.x) / 2, (box.min.y + box.max.y) / 2)
+        }
+        return (x / (3 * area), y / (3 * area))
     }
 
     /// A *finite* ground plane, deliberately not `SCNFloor`.

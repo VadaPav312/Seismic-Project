@@ -176,6 +176,17 @@ final class AppEnvironment: ObservableObject {
         reloadFromStore(snapshot)
         selectedBuildingID = buildings.first(where: \.isSandbox)?.id ?? buildings.first?.id
 
+        // Opens on a named building, for a screenshot run or a UI test — the
+        // same idea as SEISMIC_INITIAL_TAB, and the thing that makes it
+        // possible to check a render against a photograph of the real building
+        // without a person tapping through the picker each time. Matched
+        // loosely so "transamerica" finds the pyramid.
+        if let wanted = ProcessInfo.processInfo.environment["SEISMIC_INITIAL_BUILDING"]?
+            .lowercased(), !wanted.isEmpty,
+           let match = buildings.first(where: { $0.name.lowercased().contains(wanted) }) {
+            selectedBuildingID = match.id
+        }
+
         bootstrapStage = "Starting the node"
         attachSimulatedNode()
 

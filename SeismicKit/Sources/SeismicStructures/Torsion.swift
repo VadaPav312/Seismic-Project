@@ -162,23 +162,33 @@ public extension TorsionModel {
 
         let radius = section.radiusOfGyration
 
-        // Where the plan's area actually sits, against where its perimeter
-        // bracing would be centred.
+        // Where the plan's mass sits, against where its stiffness sits.
         //
-        // For a rectangle these coincide and the offset is zero. For an L, a T
-        // or any plan with a bite out of it the centroid pulls towards the
-        // solid part while the frames around the outside stay centred on the
-        // envelope — and that gap is the eccentricity, straight out of the
-        // shape, with nothing assumed.
+        // The mass is spread over the floor area, so its centre is the area
+        // centroid. The lateral system lives in the walls, so its centre is the
+        // centroid of the *perimeter* — each edge weighted by its length. The
+        // gap between the two is the eccentricity, taken from the shape with
+        // nothing assumed about the structure.
+        //
+        // The obvious cheaper proxy — the centre of the bounding box — is
+        // wrong, and wrong in a way that is easy to miss. It gives zero for a
+        // rectangle and a circle, which is right, and then reports an
+        // equilateral triangle as massively eccentric, because a triangle's
+        // centroid sits a third of the way up while its bounding box is centred
+        // half way. A triangle has three axes of symmetry and cannot twist
+        // under a force through its centre. The Tokyo Skytree was being flagged
+        // as travelling 135% further at the corners than at the centre, on a
+        // plan that is perfectly symmetric.
         var minX = Double.greatestFiniteMagnitude, maxX = -Double.greatestFiniteMagnitude
         var minY = Double.greatestFiniteMagnitude, maxY = -Double.greatestFiniteMagnitude
         for point in ring {
             minX = Swift.min(minX, point.x); maxX = Swift.max(maxX, point.x)
             minY = Swift.min(minY, point.y); maxY = Swift.max(maxY, point.y)
         }
-        let envelopeX = (minX + maxX) / 2, envelopeY = (minY + maxY) / 2
-        let geometric = ((section.centroidX - envelopeX) * (section.centroidX - envelopeX)
-                         + (section.centroidY - envelopeY) * (section.centroidY - envelopeY))
+
+        let stiffness = perimeterCentroid(ring) ?? (x: section.centroidX, y: section.centroidY)
+        let geometric = ((section.centroidX - stiffness.x) * (section.centroidX - stiffness.x)
+                         + (section.centroidY - stiffness.y) * (section.centroidY - stiffness.y))
             .squareRoot()
 
         // What the structural system adds on top of the shape. A soft storey
@@ -214,6 +224,31 @@ public extension TorsionModel {
             cornerRadius: cornerRadius,
             halfPlanDimension: planDimension / 2,
             crossAxisRatio: crossAxisRatio(for: section))
+    }
+
+    /// Centroid of the outline itself, each edge weighted by its length.
+    ///
+    /// Stands in for the centre of rigidity. A building's lateral system is in
+    /// its walls, so where the walls are is where the stiffness is — and a plan
+    /// with more of its perimeter down one side is braced more heavily down
+    /// that side.
+    ///
+    /// It agrees with the area centroid for every plan with two axes of
+    /// symmetry, and for the ones with three — which is the case the bounding
+    /// box got wrong.
+    static func perimeterCentroid(_ ring: [Coordinate2D]) -> (x: Double, y: Double)? {
+        guard ring.count >= 3 else { return nil }
+        var length = 0.0, x = 0.0, y = 0.0
+        for index in ring.indices {
+            let a = ring[index], b = ring[(index + 1) % ring.count]
+            let edge = ((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y)).squareRoot()
+            guard edge > 1e-9 else { continue }
+            length += edge
+            x += (a.x + b.x) / 2 * edge
+            y += (a.y + b.y) / 2 * edge
+        }
+        guard length > 1e-9 else { return nil }
+        return (x / length, y / length)
     }
 
     /// Sideways drift per unit forward drift, for an orthotropic plan.

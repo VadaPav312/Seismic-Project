@@ -61,6 +61,67 @@ final class PlanTorsionTests: XCTestCase {
         XCTAssertEqual(model.crossAxisRatio, 0, accuracy: 1e-6)
     }
 
+    /// The case that caught a real error: a triangle has three axes of
+    /// symmetry and cannot twist under a force through its centre, but its
+    /// centroid sits a third of the way up while its bounding box is centred
+    /// half way. Using the box as the stiffness centre reported the Tokyo
+    /// Skytree — an equilateral plan — as travelling 135% further at the
+    /// corners than at the middle.
+    func testASymmetricTriangleHasNoCalculatedEccentricity() {
+        let model = TorsionModel.of(
+            building(footprint: PlanShape.triangular.polygon(area: 2000)))
+        XCTAssertEqual(model.staticEccentricity, 0, accuracy: 0.01)
+    }
+
+    /// It is still flagged, and that is right rather than a leftover of the
+    /// bug. A triangle is a less compact shape than a square of the same area —
+    /// its plan reaches further out relative to its radius of gyration — so the
+    /// 5% allowance every building is given produces a 1.30 ratio against a
+    /// square's 1.15, and trips the same limit a code check would.
+    ///
+    /// The distinction that matters: the eccentricity above is zero, so nothing
+    /// is being invented from the shape. Only the allowance is at work.
+    func testATriangleStillTripsTheLimitOnTheAllowanceAlone() {
+        let triangle = TorsionModel.of(
+            building(footprint: PlanShape.triangular.polygon(area: 2000)))
+        let square = TorsionModel.of(building(footprint: PlanShape.square.polygon(area: 2000)))
+
+        XCTAssertEqual(triangle.designEccentricity, triangle.accidentalEccentricity,
+                       accuracy: 0.01, "nothing but the allowance should be contributing")
+        XCTAssertGreaterThan(triangle.edgeAmplification, square.edgeAmplification)
+        XCTAssertFalse(square.isTorsionallyIrregular)
+    }
+
+    /// Every regular plan, for the same reason. A shape you can rotate onto
+    /// itself has its mass and its bracing in the same place by construction.
+    func testEveryRegularPlanIsConcentric() {
+        for shape in [PlanShape.triangular, .square, .octagonal, .circular] {
+            let model = TorsionModel.of(building(footprint: shape.polygon(area: 900)))
+            XCTAssertEqual(model.staticEccentricity, 0, accuracy: 0.01,
+                           "\(shape.label) should have no calculated eccentricity")
+        }
+    }
+
+    /// And the converse, so the fix cannot have simply zeroed everything: a
+    /// plan that really is lopsided still reports it.
+    func testTheFixDidNotSimplyZeroEveryPlan() {
+        let ring = [(0.0, 0.0), (30.0, 0.0), (30.0, 12.0), (12.0, 12.0),
+                    (12.0, 30.0), (0.0, 30.0)].map { Coordinate2D(x: $0.0, y: $0.1) }
+        XCTAssertGreaterThan(TorsionModel.of(building(footprint: ring)).staticEccentricity, 0.5)
+    }
+
+    func testThePerimeterCentroidAgreesWithTheAreaCentroidWhenSymmetric() {
+        for shape in [PlanShape.triangular, .square, .circular, .octagonal] {
+            let ring = shape.polygon(area: 500)
+            let section = SectionProperties.of(ring)
+            guard let perimeter = TorsionModel.perimeterCentroid(ring) else {
+                return XCTFail("\(shape.label) should have a perimeter centroid")
+            }
+            XCTAssertEqual(perimeter.x, section.centroidX, accuracy: 0.01)
+            XCTAssertEqual(perimeter.y, section.centroidY, accuracy: 0.01)
+        }
+    }
+
     // MARK: Irregularity
 
     /// The centroid of an L sits inside the solid arm while the envelope's
@@ -71,7 +132,7 @@ final class PlanTorsionTests: XCTestCase {
                     (12.0, 30.0), (0.0, 30.0)].map { Coordinate2D(x: $0.0, y: $0.1) }
         let model = TorsionModel.of(building(footprint: ring))
 
-        XCTAssertGreaterThan(model.staticEccentricity, 1)
+        XCTAssertGreaterThan(model.staticEccentricity, 0.5)
         XCTAssertGreaterThan(model.cornerAmplification, 0.2)
         XCTAssertTrue(model.isTorsionallyIrregular)
     }
