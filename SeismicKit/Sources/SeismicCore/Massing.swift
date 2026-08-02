@@ -324,6 +324,16 @@ public struct Massing: Codable, Sendable, Equatable {
                 peak.scale * 100, peak.atHeightFraction * 100, top * 100)
         }
         if isCurved {
+            // A dome and a reciprocal taper are both curves and both end
+            // narrower than they start, so the endpoints cannot tell them
+            // apart — but they are opposite shapes, and describing a crown as
+            // "narrows quickly at first" is simply the wrong way round.
+            if scale(at: 0.5) > (stations.first?.scale ?? 1) - 0.02 {
+                return String(
+                    format: "A straight shaft that rounds over into a crown, closing to about "
+                        + "%.0f%% of the plan at the top. The structure below the shoulder is "
+                        + "uniform, so its mass is carried the whole way up.", top * 100)
+            }
             return String(
                 format: "Narrows along a curve to about %.0f%% of the base plan, quickly at "
                     + "first and then hardly at all — the profile follows the bending moment, "

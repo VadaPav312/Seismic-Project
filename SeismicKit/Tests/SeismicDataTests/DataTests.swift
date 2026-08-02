@@ -601,6 +601,50 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(store.ledger.count, 0)
     }
 
+    /// Deleting a building has to take its verdicts with it.
+    ///
+    /// Only the events were being removed, so an assessment outlived the
+    /// building it described — in the store, in the export and in the sync
+    /// payload — and the store grew a little every time somebody tried a design
+    /// and deleted it.
+    func testDeletingABuildingRemovesWhatOnlyMadeSenseAlongsideIt() {
+        store.load()
+        guard let building = store.buildingsList().first else {
+            return XCTFail("the seeded library should not be empty")
+        }
+
+        let event = SeismicEvent(buildingID: building.id, startTime: Date(),
+                                 triggerRatio: 4, label: "Test")
+        store.upsert(event)
+        store.upsert(Assessment(buildingID: building.id, eventID: event.id,
+                                verdict: .amber, damageProbability: 0.4))
+        store.upsert(CommunityTag(buildingID: building.id, verdict: .amber,
+                                  latitude: 0, longitude: 0, buildingLabel: building.name))
+
+        XCTAssertFalse(store.assessments(forBuilding: building.id).isEmpty)
+
+        store.delete(buildingID: building.id)
+
+        XCTAssertNil(store.building(building.id))
+        XCTAssertTrue(store.events(forBuilding: building.id).isEmpty)
+        XCTAssertTrue(store.assessments(forBuilding: building.id).isEmpty)
+        XCTAssertFalse(store.tagsList().contains { $0.buildingID == building.id })
+        // And nothing belonging to any other building went with it.
+        XCTAssertFalse(store.buildingsList().isEmpty)
+    }
+
+    /// The ledger is append-only and tamper-evident, so a deletion must not be
+    /// able to erase the record that the building was once assessed.
+    func testDeletingABuildingDoesNotRewriteTheLedger() {
+        store.load()
+        guard let building = store.buildingsList().first else {
+            return XCTFail("the seeded library should not be empty")
+        }
+        let before = store.ledger.count
+        store.delete(buildingID: building.id)
+        XCTAssertGreaterThanOrEqual(store.ledger.count, before)
+    }
+
     func testObservationsAreBounded() {
         let many = (0..<50_000).map { i in
             ModeObservation(modeNumber: 1, frequency: 1.0, amplitude: 1,

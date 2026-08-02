@@ -118,6 +118,20 @@ final class CurvedMassingTests: XCTestCase {
             .contains("setback"))
     }
 
+    /// A dome and a reciprocal taper both end narrower than they start, so the
+    /// endpoints cannot tell them apart — and they are opposite shapes. A dome
+    /// was describing itself as narrowing "quickly at first", which is the
+    /// wrong way round: it does not narrow at all until its shoulder.
+    func testADomeIsNotDescribedAsNarrowingFromTheGround() {
+        let dome = Massing.domed(shoulderFraction: 0.75).summary.lowercased()
+        XCTAssertTrue(dome.contains("shaft") || dome.contains("crown"))
+        XCTAssertFalse(dome.contains("quickly at first"))
+
+        // And the reciprocal taper, which really does, keeps saying so.
+        XCTAssertTrue(Massing.concave(topScale: 0.3).summary.lowercased()
+            .contains("quickly at first"))
+    }
+
     // MARK: Mass, which is what any of this is for
 
     /// Area goes with the square of a linear scale, and a barrel carries mass

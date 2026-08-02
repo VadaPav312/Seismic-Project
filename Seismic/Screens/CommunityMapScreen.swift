@@ -398,7 +398,12 @@ struct CommunityMapScreen: View {
     }
 
     private func tagsNear(_ coordinate: CLLocationCoordinate2D) -> [CommunityTag] {
-        let all = (env.tags + remoteTags)
+        // Deduplicated the same way the pins are: a tag this device published
+        // is in both the local store and the community service, and listing a
+        // building twice reads as two neighbours agreeing when it is one
+        // report counted twice.
+        var seen = Set<UUID>()
+        let all = (env.tags + remoteTags).filter { seen.insert($0.id).inserted }
         return all.filter { tag in
             let dx = (tag.longitude - coordinate.longitude) * 111.0
                 * cos(coordinate.latitude * .pi / 180)
@@ -549,10 +554,21 @@ struct CommunityMapScreen: View {
 
     private func centreOnBuilding() {
         guard let building = env.selectedBuilding else { return }
+        let home = CLLocationCoordinate2D(latitude: building.latitude,
+                                          longitude: building.longitude)
         position = .region(MKCoordinateRegion(
-            center: CLLocationCoordinate2D(latitude: building.latitude,
-                                           longitude: building.longitude),
+            center: home,
             span: MKCoordinateSpan(latitudeDelta: 0.045, longitudeDelta: 0.045)))
+
+        // `centre` has to be set here as well as by the camera.
+        //
+        // `onMapCameraChange(frequency: .onEnd)` fires when the user *moves*
+        // the map, not when it is first laid out — so switching to the
+        // earthquake layer before touching it queried the catalogue at latitude
+        // zero, longitude zero, and reported the seismicity of a patch of the
+        // Gulf of Guinea as if it were the seismicity of home.
+        centre = home
+        radiusKm = 25
     }
 
     private var summaryBar: some View {

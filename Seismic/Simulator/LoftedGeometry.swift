@@ -37,9 +37,22 @@ enum Loft {
     /// a fixed subdivision, because the mesh needs points; the flag travels
     /// with each point so the shading can tell a curve from a corner later.
     static func densified(_ ring: [Coordinate2D],
-                          segmentsPerCurve: Int = 6) -> (points: [Coordinate2D],
-                                                         curved: [Bool]) {
+                          budget: Int = 256) -> (points: [Coordinate2D], curved: [Bool]) {
         guard let drawn = OutlineCurvature.path(for: ring) else { return ([], []) }
+
+        // Subdivide as finely as the budget allows and no finer.
+        //
+        // A generated circle is 36 points and wants subdividing; a traced
+        // OpenStreetMap outline can be two hundred, and is already as dense as
+        // the survey that produced it. Subdividing that six times over, for
+        // every storey of a sixty-storey tower, is half a million vertices to
+        // describe a curve the original points already described.
+        //
+        // At one segment the Bézier collapses to the straight line between its
+        // ends, which is the original polygon — the right answer for a ring
+        // that was dense to begin with, since the smooth normals still make it
+        // read as round.
+        let segmentsPerCurve = max(1, min(6, budget / max(ring.count, 1)))
         var points: [Coordinate2D] = [drawn.start]
         var curved: [Bool] = [false]
 
@@ -215,6 +228,17 @@ enum Loft {
     private static func smoothCurvedWalls(_ normals: inout [SCNVector3],
                                           curved: [Bool], count n: Int) {
         guard n >= 3 else { return }
+
+        // Every blend is taken from the *original* face normals.
+        //
+        // Blending in place reads a value the previous vertex has already
+        // overwritten — wall `v` supplies vertex `v`'s outgoing normal and
+        // vertex `v+1`'s incoming one, and vertex `v` writes to it. The result
+        // is a smoothing that accumulates as it walks the ring, so the lighting
+        // on a drum creeps round it instead of being symmetric: subtle enough
+        // to look like a shading style rather than a bug.
+        let face = (0..<n).map { normals[$0 * 4] }
+
         // Wall `i` runs from vertex i to vertex i+1, and contributed four
         // normals at offset 4i: [bottomA, bottomB, topB, topA] — so A belongs
         // to vertex i and B to vertex i+1.
@@ -223,9 +247,9 @@ enum Loft {
             let outgoing = vertex                   // the wall leaving it
 
             let blended = normalise(SCNVector3(
-                normals[incoming * 4].x + normals[outgoing * 4].x,
-                normals[incoming * 4].y + normals[outgoing * 4].y,
-                normals[incoming * 4].z + normals[outgoing * 4].z))
+                face[incoming].x + face[outgoing].x,
+                face[incoming].y + face[outgoing].y,
+                face[incoming].z + face[outgoing].z))
 
             // B of the incoming wall and A of the outgoing wall are the same
             // point in space; both get the blend.

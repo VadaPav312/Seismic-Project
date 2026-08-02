@@ -140,6 +140,22 @@ struct BuildingDesignerScreen: View {
                                        aspectRatio: draft.aspectRatio)
     }
 
+    /// The floor area actually enclosed by the plan in use.
+    ///
+    /// For a generated shape this is what the slider asked for, because the
+    /// generator solves for it. For a traced outline it is a property of the
+    /// outline and nothing else — so the slider must not be able to contradict
+    /// it. It previously could: dragging the area while a real footprint was
+    /// selected changed the building's mass without changing its polygon, and
+    /// the model then had one area driving the modal analysis and a different
+    /// one driving the section properties.
+    private var enclosedArea: Double {
+        guard draft.usesTracedFootprint, draft.tracedFootprint.count >= 3 else {
+            return draft.footprintArea
+        }
+        return max(abs(Polygon.signedArea(draft.tracedFootprint)), 10)
+    }
+
     /// Which fields this screen should claim as hand-entered.
     ///
     /// For a new building, all of them. For an edit, only the ones whose value
@@ -172,7 +188,7 @@ struct BuildingDesignerScreen: View {
             longitude: editing?.longitude ?? 0,
             storeyCount: Int(draft.storeys.rounded()),
             height: draft.height,
-            footprintArea: draft.footprintArea,
+            footprintArea: enclosedArea,
             footprint: footprint,
             massing: massing,
             yearBuilt: Int(draft.yearBuilt.rounded()),
@@ -388,8 +404,29 @@ struct BuildingDesignerScreen: View {
                 }
             }
 
-            slider("Floor area", value: $draft.footprintArea, range: 30...8000, step: 10,
-                   format: { String(format: "%.0f m²", $0) })
+            // Offered only when the plan is a generated shape. A traced outline
+            // already has an area, and a control that appears to change it
+            // would be lying about which of the two the model uses.
+            if draft.usesTracedFootprint {
+                HStack {
+                    Text("Floor area")
+                        .font(Theme.Typography.callout)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                    Spacer()
+                    Text(String(format: "%.0f m²", enclosedArea))
+                        .font(Theme.Typography.numeric)
+                        .foregroundStyle(Theme.Palette.textPrimary)
+                }
+                .frame(minHeight: Theme.Metrics.minimumTapTarget)
+                Text("Measured from the building's own outline. Choose an idealised plan below "
+                     + "to set it by hand instead.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                slider("Floor area", value: $draft.footprintArea, range: 30...8000, step: 10,
+                       format: { String(format: "%.0f m²", $0) })
+            }
 
             slider("Year built", value: $draft.yearBuilt, range: 1850...2030, step: 1,
                    format: { String(Int($0)) })

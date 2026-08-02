@@ -338,11 +338,34 @@ public final class SeismicStore: @unchecked Sendable {
         save()
     }
 
+    /// Removes a building and everything that only made sense alongside it.
+    ///
+    /// The events were already going; the assessments, the damage notes and the
+    /// community tags were not, so deleting a building left its verdicts behind
+    /// permanently. That is worse than untidy. An assessment outlives its
+    /// building in the export, in the sync payload and in `assessments` — and
+    /// the screens that list verdicts had no building to name, while the store
+    /// grew every time somebody tried out a design and deleted it.
+    ///
+    /// Deliberately not deleted: the ledger. It is tamper-evident and
+    /// append-only, and the point of such a record is that removing a building
+    /// cannot remove the evidence that it was once assessed.
     public func delete(buildingID: UUID) {
         lock.lock()
         buildings.removeValue(forKey: buildingID)
-        let related = events.values.filter { $0.buildingID == buildingID }.map(\.id)
-        for id in related { events.removeValue(forKey: id) }
+
+        let relatedEvents = events.values.filter { $0.buildingID == buildingID }.map(\.id)
+        for id in relatedEvents { events.removeValue(forKey: id) }
+
+        for id in assessments.values.filter({ $0.buildingID == buildingID }).map(\.id) {
+            assessments.removeValue(forKey: id)
+        }
+        for id in notes.values.filter({ $0.buildingID == buildingID }).map(\.id) {
+            notes.removeValue(forKey: id)
+        }
+        for id in tags.values.filter({ $0.buildingID == buildingID }).map(\.id) {
+            tags.removeValue(forKey: id)
+        }
         lock.unlock()
         save()
     }

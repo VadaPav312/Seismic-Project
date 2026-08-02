@@ -166,9 +166,31 @@ final class NotificationCentre: NSObject, ObservableObject {
     /// Scheduled once, for when the aftershock rate has fallen far enough that
     /// re-entry advice changes. Deliberately a single notification rather than a
     /// running commentary on every aftershock.
+    ///
+    /// "Once" has to be enforced, not merely intended. A verdict arrives after
+    /// every event, and an aftershock sequence produces a great many of them —
+    /// so each one was queueing another advice notification at its own wait
+    /// time, and somebody sheltering through a bad night would have been told
+    /// four separate times that it was safe to go back in, at four different
+    /// hours, each one out of date the moment the next shock arrived. Only the
+    /// most recent forecast is worth anything, so the pending one is replaced.
     func scheduleAftershockAdvice(afterHours hours: Double, headline: String, detail: String) {
+        cancelPending(.aftershockWindow)
         guard hours > 0 else { return }
         notify(.aftershockWindow, title: headline, body: detail, after: hours * 3600)
+    }
+
+    /// Drops anything of one kind that has not fired yet.
+    ///
+    /// Identifiers are `kind-uuid`, so the prefix is what identifies a kind.
+    func cancelPending(_ kind: Kind) {
+        centre.getPendingNotificationRequests { requests in
+            let stale = requests.map(\.identifier)
+                .filter { $0.hasPrefix(kind.rawValue + "-") }
+            guard !stale.isEmpty else { return }
+            UNUserNotificationCenter.current()
+                .removePendingNotificationRequests(withIdentifiers: stale)
+        }
     }
 
     func cancelAll() {
