@@ -76,16 +76,22 @@ struct SpeakButton: View {
 }
 
 extension View {
-    /// Puts a speaker button in the corner of a block of text.
+    /// Puts a speaker button underneath a block of text, clear of it.
     ///
-    /// An overlay rather than an `HStack`, so adding one never changes the
-    /// layout of what it is attached to — which is what makes it cheap enough
-    /// to put on everything worth hearing.
+    /// It was an overlay, which was wrong: an overlay is drawn *on top of* what
+    /// it is attached to, so the button sat over the last line of every
+    /// paragraph it was added to and covered the words. Reserving a row for it
+    /// costs a little vertical space and is the only arrangement that cannot
+    /// hide the thing it offers to read.
     func readAloud(_ text: @autoclosure @escaping () -> String,
-                   alignment: Alignment = .topTrailing) -> some View {
-        overlay(alignment: alignment) {
-            SpeakButton(text(), compact: true)
-                .offset(x: 10)
+                   alignment: HorizontalAlignment = .leading) -> some View {
+        VStack(alignment: alignment, spacing: 2) {
+            self
+            SpeakButton(text())
+                .padding(.leading, alignment == .leading ? -Theme.Metrics.s4 : 0)
+                .padding(.trailing, alignment == .trailing ? -Theme.Metrics.s4 : 0)
         }
+        .frame(maxWidth: .infinity,
+               alignment: alignment == .trailing ? .trailing : .leading)
     }
 }

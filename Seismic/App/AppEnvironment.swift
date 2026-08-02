@@ -231,7 +231,29 @@ final class AppEnvironment: ObservableObject {
         link.onDeclaredEvent = { [weak self] isDrill in
             self?.nodeDeclaredEvent(isDrill: isDrill)
         }
+
+        // A connected board becomes the app's sensor, from wherever it was
+        // connected.
+        //
+        // This was the whole of the "connected but no data" problem. Attaching
+        // the transport happened only in the Node screen's picker, and the
+        // Hardware screen has its own scanner that talks to the link directly —
+        // so connecting there lit up every instrument on *that* screen while
+        // the monitor, the detector and the assessment carried on reading the
+        // simulator. Two screens showing different sensors at once, one of them
+        // silently synthetic.
+        link.$connection
+            .removeDuplicates()
+            .sink { [weak self] state in
+                guard let self else { return }
+                guard self.link.source == .bluetooth, state.isLive else { return }
+                guard self.hardwareTransport == nil else { return }
+                self.attachHardwareNode(startScanning: false)
+            }
+            .store(in: &nodeObservers)
     }
+
+    private var nodeObservers: Set<AnyCancellable> = []
 
     static func live() -> AppEnvironment {
         #if canImport(Security)
@@ -490,7 +512,10 @@ final class AppEnvironment: ObservableObject {
     ///
     /// The rest of the app is unaffected: it talks to `NodeSession`, which
     /// cannot tell what is underneath it.
-    func attachHardwareNode() {
+    /// - Parameter startScanning: false when the link is already connected —
+    ///   which it is whenever this is reached from the Hardware screen, and
+    ///   starting a scan then would tear down the working link to look for one.
+    func attachHardwareNode(startScanning: Bool = true) {
         stopTicking()
         releaseTransports()
         sensorSource = .node
@@ -498,7 +523,12 @@ final class AppEnvironment: ObservableObject {
         let transport = FirmwareNodeTransport(link: link)
         hardwareTransport = transport
         wire(transport)
-        transport.startScanning()
+        if startScanning {
+            transport.startScanning()
+        } else {
+            appendLog("The node is now this app's sensor. Everything on the monitor, the "
+                      + "detector and the assessment is coming from the board.")
+        }
         startTicking()
     }
 
@@ -793,10 +823,49 @@ final class AppEnvironment: ObservableObject {
 
     /// Injects a simulated earthquake — the demo affordance, available from the
     /// node screen and from presentation mode.
+    /// Runs an event on whatever the app is currently listening to.
+    ///
+    /// It used to inject into `simulatedNode` and nothing else — so on a phone
+    /// or a connected board, where that property is nil, the button did
+    /// absolutely nothing and said nothing about it. A control that is visibly
+    /// enabled and silently inert is worse than one that is missing.
+    ///
+    /// Each source gets the most real thing it can do: the simulator gets a
+    /// synthetic wave through its physics, a connected board runs its own
+    /// firmware drill end to end, and a phone — which has no way to shake
+    /// itself — gets an honest local drill, clearly marked as one.
     func simulateEarthquake(magnitude: Double = 6.4, distanceKm: Double = 22) {
-        simulatedNode?.injectSyntheticEvent(magnitude: magnitude, distanceKm: distanceKm)
-        appendLog("Injecting a simulated magnitude "
-                  + String(format: "%.1f", magnitude) + " at \(Int(distanceKm)) km.")
+        switch sensorSource {
+        case .simulated:
+            simulatedNode?.injectSyntheticEvent(magnitude: magnitude, distanceKm: distanceKm)
+            appendLog("Injecting a simulated magnitude "
+                      + String(format: "%.1f", magnitude) + " at \(Int(distanceKm)) km.")
+
+        case .node:
+            link.send(.drill)
+            appendLog("Asked the node to run its full event sequence. What follows is the "
+                      + "board's own timing, not this app's.")
+
+        case .phone:
+            // A phone cannot shake itself, and pretending it detected something
+            // would put a fabricated trigger into the event log next to real
+            // ones. Marked as a drill, which is what it is.
+            appendLog("This phone cannot generate ground motion, so this is a drill of the "
+                      + "warning sequence rather than a detection.")
+            guard activeEvent == nil else { return }
+            activeEvent = ActiveEvent(startedAt: Date(), triggerRatio: 0,
+                                      estimatedMagnitude: magnitude,
+                                      secondsUntilStrongShaking: 10,
+                                      expectedIntensity: AttenuationModel.predict(
+                                        magnitude: magnitude,
+                                        distanceKm: distanceKm).mercalli,
+                                      isDrill: true)
+            Haptics.shared.startCountdown(seconds: 10)
+            live.start(buildingName: selectedBuilding?.name ?? "Your building",
+                       secondsUntilShaking: 10, magnitude: magnitude,
+                       intensity: nil, isDrill: true)
+        }
+        Haptics.shared.play(.eventTriggered)
     }
 
     func introduceSimulatedDamage() {

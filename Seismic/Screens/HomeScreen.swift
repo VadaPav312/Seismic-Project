@@ -83,7 +83,7 @@ struct HomeScreen: View {
                 }
 
                 if let assessment = env.latestAssessment {
-                    NavigationLink(value: AppSection.assess) {
+                    SectionLink(section: AppSection.assess) {
                         VerdictPlacard(verdict: assessment.verdict,
                                        confidence: assessment.confidence)
                     }
@@ -153,7 +153,7 @@ struct HomeScreen: View {
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.Palette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
-                .readAloud(Self.baselineExplanation, alignment: .bottomTrailing)
+                .readAloud(Self.baselineExplanation)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .instrumentPanel()
@@ -223,7 +223,7 @@ struct HomeScreen: View {
                 }
             }
 
-            NavigationLink(value: AppSection.node) {
+            SectionLink(section: AppSection.node) {
                 HStack {
                     Text("Node diagnostics")
                     Spacer()
@@ -254,7 +254,7 @@ struct HomeScreen: View {
                     EventRow(event: event)
                 }
                 if env.events.count > 4 {
-                    NavigationLink(value: AppSection.assess) {
+                    SectionLink(section: AppSection.assess) {
                         Text("See all \(env.events.count) events")
                             .font(Theme.Typography.callout)
                             .foregroundStyle(Theme.Palette.accent)
@@ -290,7 +290,7 @@ struct HomeScreen: View {
                 }
             }
 
-            NavigationLink(value: AppSection.map) {
+            SectionLink(section: AppSection.map) {
                 HStack {
                     Text("Open the community map")
                     Spacer()

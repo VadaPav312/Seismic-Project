@@ -429,18 +429,21 @@ private struct PreparednessRow: View {
                 }
                 Spacer(minLength: 0)
 
-                // Outside the tick button's own label would put a button inside
-                // a button, which SwiftUI resolves by giving every tap to the
-                // outer one. It is a sibling in the same row instead.
+                // A gap the speaker button sits in, reserved here rather than
+                // taken by an overlay drawn on top of the words.
+                Color.clear.frame(width: Theme.Metrics.minimumTapTarget)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .instrumentPanel()
         }
         .buttonStyle(.plain)
+        // A sibling of the tick button rather than inside its label: a button
+        // within a button is resolved by SwiftUI in favour of the outer one, so
+        // every tap on the speaker would have ticked the item off instead.
         .overlay(alignment: .topTrailing) {
             SpeakButton("\(item.title). \(item.detail)", compact: true)
-                .padding(.trailing, 6)
-                .padding(.top, 4)
+                .padding(.trailing, Theme.Metrics.s2)
+                .padding(.top, Theme.Metrics.s2)
         }
         .accessibilityAddTraits(isDone ? [.isButton, .isSelected] : .isButton)
     }

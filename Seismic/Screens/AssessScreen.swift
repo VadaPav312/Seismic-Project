@@ -425,7 +425,7 @@ struct AssessScreen: View {
                     .font(Theme.Typography.body)
                     .foregroundStyle(Theme.Palette.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
-                    .readAloud(paragraph, alignment: .bottomTrailing)
+                    .readAloud(paragraph)
             }
 
             // When a model produced a figure nobody measured, the answer is

@@ -915,3 +915,37 @@ struct SettingsValue: View {
             .foregroundStyle(Theme.Palette.textSecondary)
     }
 }
+
+// MARK: - Going to another section
+
+/// A tappable row that actually reaches the section it names.
+///
+/// The Home screen used `NavigationLink(value: AppSection…)`, and nothing in
+/// this app ever declared a `navigationDestination` for `AppSection` — so every
+/// one of those links pushed a value nobody handled and did nothing at all when
+/// tapped. It looked like a link, it highlighted like a link, and it went
+/// nowhere.
+///
+/// There is no `NavigationStack` to push onto anyway: four of the sections are
+/// tabs and the rest are full-screen covers, which is a decision that lives in
+/// `RootView`. So this asks for a section the way everything else in the app
+/// does — through `requestedSection`, which `RootView` honours by switching
+/// tabs or presenting a cover as appropriate.
+struct SectionLink<Label: View>: View {
+    let section: AppSection
+    @ViewBuilder var label: () -> Label
+
+    @EnvironmentObject private var env: AppEnvironment
+
+    var body: some View {
+        Button {
+            Haptics.shared.play(.selection)
+            env.requestedSection = section
+        } label: {
+            label()
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityHint("Opens \(section.title)")
+    }
+}
