@@ -97,7 +97,10 @@ final class MassingTests: XCTestCase {
         ])
         for station in massing.stations {
             XCTAssertTrue((0...1).contains(station.heightFraction))
-            XCTAssertTrue((0.05...1).contains(station.scale))
+            // The ceiling is above 1 on purpose: buildings really do overhang
+            // their own base, and capping at the ground plan made every
+            // profile monotonically narrowing by construction.
+            XCTAssertTrue((0.05...Massing.Station.maximumScale).contains(station.scale))
         }
         for fraction in [-1.0, 0, 0.5, 1, 99] {
             XCTAssertTrue(massing.scale(at: fraction).isFinite)

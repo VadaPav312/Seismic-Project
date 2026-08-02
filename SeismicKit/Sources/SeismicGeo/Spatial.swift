@@ -467,3 +467,93 @@ public enum LocationPrivacy {
         }
     }
 }
+
+// MARK: - Triangulation
+
+public extension Polygon {
+
+    /// Splits a simple polygon into triangles by ear clipping.
+    ///
+    /// Returns indices into `ring`, three per triangle, wound anticlockwise.
+    ///
+    /// A fan from the centroid would be shorter and is what most code reaches
+    /// for, but it is only correct for star-shaped polygons — and the plans
+    /// this app cares most about are not. An L, a T, a U and a cruciform are
+    /// all concave, and for a U the centroid lands in the courtyard, so a fan
+    /// from it roofs the courtyard over. That is not a cosmetic error: the
+    /// courtyard is the reason the plan is irregular in the first place.
+    ///
+    /// Degenerate and self-intersecting rings return whatever was clipped
+    /// before the algorithm ran out of ears, rather than looping. A missing
+    /// triangle on a broken outline is a far smaller problem than a hang.
+    static func triangulate(_ ring: [Coordinate2D]) -> [Int] {
+        // Drop a repeated closing vertex before anything else.
+        //
+        // Half the rings in this codebase carry one — every `PlanShape`
+        // polygon does — and it is a zero-length edge, which the ear test
+        // cannot reason about. The symptom is quiet and strange: a square came
+        // out covered to exactly half its area, and a triangle to none of it.
+        var n = ring.count
+        if n > 3, let first = ring.first, let last = ring.last,
+           abs(first.x - last.x) < 1e-9, abs(first.y - last.y) < 1e-9 {
+            n -= 1
+        }
+        guard n >= 3 else { return [] }
+        if n == 3 { return [0, 1, 2] }
+
+        // Work anticlockwise throughout, so "convex" has one meaning.
+        var order = Array(0..<n)
+        if signedArea(Array(ring.prefix(n))) < 0 { order.reverse() }
+
+        var triangles: [Int] = []
+        var attempts = 0
+        let limit = n * n + 16
+
+        while order.count > 3 && attempts < limit {
+            attempts += 1
+            var clipped = false
+
+            for position in 0..<order.count {
+                let previous = order[(position + order.count - 1) % order.count]
+                let current = order[position]
+                let next = order[(position + 1) % order.count]
+
+                guard isLeftTurn(ring[previous], ring[current], ring[next]) else { continue }
+                // An ear may not contain any other vertex of the polygon.
+                let occupied = order.contains { other in
+                    other != previous && other != current && other != next
+                        && contains(triangle: (ring[previous], ring[current], ring[next]),
+                                    point: ring[other])
+                }
+                guard !occupied else { continue }
+
+                triangles.append(contentsOf: [previous, current, next])
+                order.remove(at: position)
+                clipped = true
+                break
+            }
+            if !clipped { break }
+        }
+
+        if order.count == 3 { triangles.append(contentsOf: order) }
+        return triangles
+    }
+
+    private static func isLeftTurn(_ a: Coordinate2D, _ b: Coordinate2D,
+                                   _ c: Coordinate2D) -> Bool {
+        (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x) > 0
+    }
+
+    private static func contains(triangle: (Coordinate2D, Coordinate2D, Coordinate2D),
+                                 point p: Coordinate2D) -> Bool {
+        func side(_ p: Coordinate2D, _ q: Coordinate2D, _ r: Coordinate2D) -> Double {
+            (p.x - r.x) * (q.y - r.y) - (q.x - r.x) * (p.y - r.y)
+        }
+        let d1 = side(p, triangle.0, triangle.1)
+        let d2 = side(p, triangle.1, triangle.2)
+        let d3 = side(p, triangle.2, triangle.0)
+        let negative = d1 < 0 || d2 < 0 || d3 < 0
+        let positive = d1 > 0 || d2 > 0 || d3 > 0
+        return !(negative && positive)
+    }
+}

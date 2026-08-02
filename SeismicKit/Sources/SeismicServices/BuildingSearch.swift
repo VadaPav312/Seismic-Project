@@ -1032,6 +1032,55 @@ public actor BuildingSearchService {
         var confidence: Double
     }
 
+    /// Searches the web for what the building actually looks like.
+    ///
+    /// The candidate snippets this service already holds came from a search for
+    /// structural facts — height, storeys, lateral system — and are usually
+    /// silent about shape. This is a second, narrower search aimed at the
+    /// architecture: the words that describe a silhouette rather than a frame.
+    ///
+    /// It exists because the alternative is asking a language model to recall a
+    /// specific building's form from memory, which is the sort of question it
+    /// answers fluently and often wrongly. Handing it a page to read first
+    /// turns recall into reading comprehension.
+    ///
+    /// Returns empty when no web provider has a key, which is the common case
+    /// and not a failure: everything downstream treats an empty description as
+    /// "nothing was found" and falls back to the prose already in hand.
+    func formDescription(of candidate: BuildingCandidate) async -> String {
+        if let cached = formCache[candidate.name] { return cached }
+
+        let query = "\(candidate.name) architecture form shape silhouette facade "
+            + "curved tapered massing description"
+        var found: [String] = []
+
+        // Tavily and Exa first: both return extracted page text rather than a
+        // result title, and a building's shape is described in the prose.
+        if let key = vault.value(for: .tavilyAPIKey),
+           let results = try? await TavilyClient().search(query, apiKey: key, client: client) {
+            found = results.map(\.snippet)
+        } else if let key = vault.value(for: .exaAPIKey),
+                  let results = try? await ExaClient().search(query, apiKey: key, client: client) {
+            found = results.map(\.snippet)
+        } else if let key = vault.value(for: .serperAPIKey),
+                  let results = try? await SerperClient().search(query, apiKey: key,
+                                                                 client: client) {
+            found = results.map(\.snippet)
+        } else if let key = vault.value(for: .braveSearchAPIKey),
+                  let results = try? await BraveClient().search(query, apiKey: key,
+                                                                client: client) {
+            found = results.map(\.snippet)
+        }
+
+        let joined = found.filter { !$0.isEmpty }.joined(separator: " ")
+        formCache[candidate.name] = joined
+        return joined
+    }
+
+    /// One form search per building per session. The answer does not change
+    /// while the app is open, and the plan shape and the massing both want it.
+    private var formCache: [String: String] = [:]
+
     /// Reads the massing out of the source text, then asks the model if the
     /// text is silent.
     ///
@@ -1058,6 +1107,25 @@ public actor BuildingSearchService {
 
         guard await analyst.hasAnyProvider else { return nil }
 
+        // Read about the building's form before asking about it.
+        //
+        // The candidate snippet came from a search for structural facts —
+        // height, storeys, system — and is usually silent on shape. Asking a
+        // model to recall a specific building's silhouette from memory is
+        // exactly the kind of question it will answer confidently and wrongly,
+        // so it is given something to read first: a search aimed at the
+        // architecture rather than the engineering.
+        let read = await formDescription(of: candidate)
+
+        // Prose that arrived from that search may name the shape outright, in
+        // which case there is nothing to ask.
+        if let described = Self.massingFromText(read.lowercased()) {
+            return ResolvedMassing(massing: described.massing, style: described.style,
+                                   reason: "Described as \(described.style) in what the web says "
+                                       + "about its architecture",
+                                   confidence: 0.65)
+        }
+
         let request = AnalystRequest(
             task: .buildingSummary,
             subject: candidate.name,
@@ -1067,12 +1135,23 @@ public actor BuildingSearchService {
                 AnalystFact(label: "Storeys", value: String(storeys)),
                 AnalystFact(label: "What the sources say",
                             value: String(candidate.snippet.prefix(400))),
+                AnalystFact(label: "What the web says about its architecture",
+                            value: String(read.prefix(1200))),
             ],
-            question: "Seen from the side, does this building keep the same width all the way "
-                    + "up, narrow continuously, step inwards at intervals, or sit as a slim "
-                    + "tower on a wider base? Answer with exactly one word and nothing else: "
-                    + "uniform, tapered, setback, or podium. If you do not know this specific "
-                    + "building, answer: unknown.")
+            question: "Seen from the side, what is this building's silhouette? Answer with "
+                    + "exactly one word and nothing else, from this list: "
+                    + "uniform — the same width all the way up; "
+                    + "tapered — narrowing steadily along straight edges; "
+                    + "concave — narrowing along a curve, fast near the base then slowly, like "
+                    + "a cooling tower or a pagoda; "
+                    + "barrel — widest somewhere in the middle and closing towards the top, "
+                    + "like 30 St Mary Axe; "
+                    + "domed — a straight shaft with a rounded crown; "
+                    + "setback — stepping inwards abruptly at intervals; "
+                    + "podium — a slim tower standing on a wider base. "
+                    + "Curved silhouettes are common and must not be reported as tapered: "
+                    + "choose tapered only when the edges are genuinely straight. "
+                    + "If you do not know this specific building, answer: unknown.")
 
         let answer = await analyst.answer(request)
         guard answer.value.isAIGenerated else { return nil }
@@ -1096,7 +1175,18 @@ public actor BuildingSearchService {
 
     /// Matches the words buildings are actually described with.
     static func massingFromText(_ text: String) -> ResolvedMassing? {
+        // Curved forms come first, and deliberately. "Tapering" appears in
+        // almost every description of a tall building, including the ones that
+        // taper along a curve — so a text that says both "bulging" and
+        // "tapering" is a barrel, and matching the commoner word first would
+        // flatten every curved tower in the world into a cone.
         let patterns: [(needles: [String], style: String)] = [
+            (["bulge", "bulging", "swells", "swelling", "barrel", "gherkin", "bullet-shaped",
+              "widest at the middle", "widest in the middle", "cigar", "ovoid", "egg-shaped",
+              "convex"], "barrel"),
+            (["hyperboloid", "hyperbolic", "concave", "flares at the base", "flared base",
+              "cooling tower", "pagoda-like", "waisted"], "concave"),
+            (["dome", "domed", "rounded crown", "rounded top", "bulbous top", "onion"], "domed"),
             (["podium", "on a base", "tower rises from", "plinth"], "podium"),
             (["setback", "set-back", "stepped", "ziggurat", "wedding cake"], "setback"),
             (["taper", "tapering", "pyramid", "narrows towards", "conical", "spire-like"],
@@ -1122,6 +1212,9 @@ public actor BuildingSearchService {
         case "tapered": (Massing.tapered(topScale: 0.42), "tapered")
         case "setback": (Massing.setback(steps: 3, topScale: 0.55), "setback")
         case "podium": (Massing.podium(podiumFraction: 0.22, towerScale: 0.55), "podium")
+        case "barrel": (Massing.barrel(bulge: 0.18, atFraction: 0.35, topScale: 0.5), "barrel")
+        case "concave": (Massing.concave(topScale: 0.38), "concave")
+        case "domed": (Massing.domed(shoulderFraction: 0.78), "domed")
         default: nil
         }
     }
@@ -1151,6 +1244,17 @@ public actor BuildingSearchService {
                                 source: .webSearch)
         }
 
+        // The same architectural search the massing uses, cached, so this costs
+        // nothing extra when both run. A description of the building's form is
+        // far likelier to name its plan than a page about its height is.
+        let read = await formDescription(of: candidate)
+        if !read.isEmpty, let shape = PlanShape.parse(read) {
+            return ResolvedPlan(shape: shape, confidence: 0.65,
+                                reason: "Described as \(shape.label.lowercased()) in what the "
+                                    + "web says about its architecture",
+                                source: .webSearch)
+        }
+
         guard await analyst.hasAnyProvider else { return nil }
 
         let options = PlanShape.allCases.map(\.rawValue).joined(separator: ", ")
@@ -1161,9 +1265,14 @@ public actor BuildingSearchService {
                 AnalystFact(label: "Building", value: candidate.name),
                 AnalystFact(label: "Location", value: candidate.subtitle),
                 AnalystFact(label: "Description", value: String(described.prefix(400))),
+                AnalystFact(label: "What the web says about its architecture",
+                            value: String(read.prefix(1200))),
             ],
             question: "What is this building's footprint shape seen from directly above? "
                     + "Answer with exactly one of these words and nothing else: \(options). "
+                    + "Curved plans are common — a great many towers are circular, elliptical "
+                    + "or have one bowed face — so do not answer with a rectangular shape "
+                    + "unless the walls really are straight. "
                     + "If you do not know this specific building, answer: unknown.")
 
         let answer = await analyst.answer(request)

@@ -71,15 +71,26 @@ struct BuildingDesignerScreen: View {
     }
 
     enum MassingStyle: String, CaseIterable, Identifiable {
-        case uniform, tapered, setback, podium
+        case uniform, tapered, concave, barrel, domed, setback, podium
         var id: String { rawValue }
 
         var label: String {
             switch self {
             case .uniform: "Uniform"
             case .tapered: "Tapered"
+            case .concave: "Curved in"
+            case .barrel: "Barrel"
+            case .domed: "Domed"
             case .setback: "Setback"
             case .podium: "Podium"
+            }
+        }
+
+        /// Whether the silhouette is a curve rather than straight edges.
+        var isCurved: Bool {
+            switch self {
+            case .concave, .barrel, .domed: true
+            default: false
             }
         }
 
@@ -88,8 +99,21 @@ struct BuildingDesignerScreen: View {
             case .uniform:
                 "The same plan from base to roof. What almost every ordinary building is."
             case .tapered:
-                "Narrows continuously. Puts mass low and reduces the overturning moment at "
-                    + "the base — the Transamerica Pyramid's shape is structural, not stylistic."
+                "Narrows continuously along straight edges. Puts mass low and reduces the "
+                    + "overturning moment at the base — the Transamerica Pyramid's shape is "
+                    + "structural, not stylistic."
+            case .concave:
+                "Narrows along a curve: hard near the base, then hardly at all. The profile "
+                    + "follows the bending moment, which is largest at the base and falls away "
+                    + "fast — the reason cooling towers and pagodas have this silhouette."
+            case .barrel:
+                "Widest somewhere in the middle, closing towards the top. 30 St Mary Axe and "
+                    + "Torre Agbar. Carrying mass outward and upward raises the moment at the "
+                    + "base, so the shape costs something and is chosen anyway."
+            case .domed:
+                "A straight shaft that rounds over into a crown. The structure below the "
+                    + "shoulder is genuinely uniform, which a taper over the whole height "
+                    + "would misrepresent."
             case .setback:
                 "Steps in at intervals. Each step is a discontinuity in stiffness and mass, "
                     + "and demand concentrates at the storeys where they happen."
@@ -103,13 +127,7 @@ struct BuildingDesignerScreen: View {
     // MARK: Derived
 
     private var massing: Massing {
-        switch draft.massingStyle {
-        case .uniform: .uniform
-        case .tapered: .tapered(topScale: 1 - draft.massingAmount)
-        case .setback: .setback(steps: 3, topScale: 1 - draft.massingAmount)
-        case .podium: .podium(podiumFraction: draft.podiumFraction,
-                              towerScale: 1 - draft.massingAmount)
-        }
+        preview(of: draft.massingStyle)
     }
 
     /// The plan being used: the building's own outline where it has one and it
@@ -500,21 +518,54 @@ struct BuildingDesignerScreen: View {
         VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
             SectionLabel("How it changes with height", systemImage: "building.columns")
 
-            Picker("Massing", selection: $draft.massingStyle) {
+            // A grid of silhouettes rather than a segmented control. Seven
+            // options will not fit across a phone as words, and the silhouette
+            // is the thing being chosen — reading "concave" tells you far less
+            // than seeing the curve does.
+            LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 4),
+                      spacing: 8) {
                 ForEach(MassingStyle.allCases) { style in
-                    Text(style.label).tag(style)
+                    Button {
+                        draft.massingStyle = style
+                        settle()
+                    } label: {
+                        VStack(spacing: 6) {
+                            MassingThumbnail(massing: preview(of: style))
+                                .frame(height: 42)
+                            Text(style.label)
+                                .font(Theme.Typography.caption)
+                                .lineLimit(1)
+                                .minimumScaleFactor(0.7)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall,
+                                             style: .continuous)
+                                .fill(draft.massingStyle == style
+                                      ? Theme.Palette.accentDim : Theme.Palette.surfaceRaised))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall,
+                                             style: .continuous)
+                                .strokeBorder(draft.massingStyle == style
+                                              ? Theme.Palette.accent : Theme.Palette.hairline,
+                                              lineWidth: 1))
+                        .foregroundStyle(draft.massingStyle == style
+                                         ? Theme.Palette.accent : Theme.Palette.textSecondary)
+                    }
+                    .buttonStyle(.plain)
                 }
             }
-            .pickerStyle(.segmented)
-            .onChange(of: draft.massingStyle) { _, _ in settle() }
 
             if draft.massingStyle != .uniform {
-                slider("Narrowing", value: $draft.massingAmount, range: 0.1...0.8, step: 0.05,
+                slider(draft.massingStyle == .domed ? "How much crown" : "Narrowing",
+                       value: $draft.massingAmount, range: 0.1...0.8, step: 0.05,
                        format: { String(format: "%.0f%%", $0 * 100) })
             }
-            if draft.massingStyle == .podium {
-                slider("Podium height", value: $draft.podiumFraction, range: 0.1...0.6, step: 0.05,
-                       format: { String(format: "%.0f%% of the building", $0 * 100) })
+            if draft.massingStyle == .podium || draft.massingStyle == .barrel {
+                slider(draft.massingStyle == .barrel ? "Widest at" : "Podium height",
+                       value: $draft.podiumFraction, range: 0.1...0.6, step: 0.05,
+                       format: { String(format: "%.0f%% of the height", $0 * 100) })
             }
 
             Text(draft.massingStyle.explanation)
@@ -740,6 +791,13 @@ struct BuildingDesignerScreen: View {
         scene.build(building, animated: false)
     }
 
+    /// The profile a style produces at the settings currently on screen, so the
+    /// thumbnails move with the sliders rather than showing a fixed cartoon.
+    private func preview(of style: MassingStyle) -> Massing {
+        MassingStyle.profile(style, amount: draft.massingAmount,
+                             podiumFraction: draft.podiumFraction)
+    }
+
     private func isSelected(_ shape: PlanShape) -> Bool {
         !draft.usesTracedFootprint && draft.planShape == shape
     }
@@ -774,6 +832,28 @@ struct BuildingDesignerScreen: View {
 }
 
 extension BuildingDesignerScreen.MassingStyle {
+
+    /// The profile a style produces at a given pair of slider settings.
+    ///
+    /// Pure, and separate from the view, so the thumbnails can ask what each of
+    /// the seven styles *would* look like at the current settings without the
+    /// view having to mutate its own draft to find out.
+    static func profile(_ style: Self, amount: Double, podiumFraction: Double) -> Massing {
+        switch style {
+        case .uniform: .uniform
+        case .tapered: .tapered(topScale: 1 - amount)
+        case .concave: .concave(topScale: 1 - amount)
+        // The slider means "how much shape", so for a barrel it drives both the
+        // swell and the close — a barrel that bulges without closing is just a
+        // building on a small base.
+        case .barrel: .barrel(bulge: amount * 0.45, atFraction: podiumFraction,
+                              topScale: 1 - amount * 0.8)
+        case .domed: .domed(shoulderFraction: 1 - amount * 0.7)
+        case .setback: .setback(steps: 3, topScale: 1 - amount)
+        case .podium: .podium(podiumFraction: podiumFraction, towerScale: 1 - amount)
+        }
+    }
+
     /// Reads a massing profile back as the control settings that produce it.
     ///
     /// The profile is the stored form and the four styles are the vocabulary
@@ -796,11 +876,75 @@ extension BuildingDesignerScreen.MassingStyle {
             if drop > 0.02 { steps.append((upper.heightFraction, drop)) }
         }
 
-        if steps.isEmpty { return (.tapered, amount, 0.25) }
+        if steps.isEmpty {
+            // Curved before straight. A barrel and a hyperbolic taper both end
+            // narrower than they start, so reading only the endpoints would
+            // call every curve a taper and quietly straighten it on save.
+            if massing.bulges {
+                let peak = massing.widest
+                return (.barrel, min(max((peak.scale - 1) / 0.45, 0.1), 0.8),
+                        min(max(peak.atHeightFraction, 0.1), 0.6))
+            }
+            if massing.isCurved {
+                // A dome is flat until its shoulder and then falls away; a
+                // concave taper is narrowing from the ground up.
+                let atQuarter = massing.scale(at: 0.25)
+                if atQuarter > 0.98 {
+                    let shoulder = (0...20).map { Double($0) / 20 }
+                        .first { massing.scale(at: $0) < 0.98 } ?? 0.75
+                    return (.domed, min(max((1 - shoulder) / 0.7, 0.1), 0.8), 0.25)
+                }
+                return (.concave, amount, 0.25)
+            }
+            return (.tapered, amount, 0.25)
+        }
         if steps.count == 1 {
             return (.podium, amount, min(max(steps[0].fraction, 0.1), 0.6))
         }
         return (.setback, amount, 0.25)
+    }
+}
+
+/// The building's silhouette seen from the side, for the massing picker.
+///
+/// Drawn from the same profile the model uses, so what you pick is what you
+/// get — and drawn as a curve where the profile is curved, because the whole
+/// point of the new shapes is that they are not made of straight edges.
+struct MassingThumbnail: View {
+    let massing: Massing
+
+    var body: some View {
+        Canvas { context, size in
+            let samples = 40
+            let widest = max(massing.widest.scale, 1)
+            let halfWidth = size.width * 0.42 / widest
+
+            // Sampled up one side and back down the other, so the silhouette
+            // is symmetric about its own axis the way an elevation is.
+            var path = Path()
+            for step in 0...samples {
+                let t = Double(step) / Double(samples)
+                let point = CGPoint(x: size.width / 2 + massing.scale(at: t) * halfWidth,
+                                    y: size.height * (1 - t))
+                if step == 0 { path.move(to: point) } else { path.addLine(to: point) }
+            }
+            for step in stride(from: samples, through: 0, by: -1) {
+                let t = Double(step) / Double(samples)
+                path.addLine(to: CGPoint(x: size.width / 2 - massing.scale(at: t) * halfWidth,
+                                         y: size.height * (1 - t)))
+            }
+            path.closeSubpath()
+
+            context.fill(path, with: .color(Theme.Palette.accent.opacity(0.22)))
+            context.stroke(path, with: .color(Theme.Palette.accent), lineWidth: 1.2)
+
+            // The ground, so a domed crown does not read as a floating pill.
+            var ground = Path()
+            ground.move(to: CGPoint(x: size.width * 0.1, y: size.height))
+            ground.addLine(to: CGPoint(x: size.width * 0.9, y: size.height))
+            context.stroke(ground, with: .color(Theme.Palette.hairlineStrong), lineWidth: 1)
+        }
+        .accessibilityLabel(massing.summary)
     }
 }
 

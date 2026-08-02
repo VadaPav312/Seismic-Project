@@ -185,6 +185,7 @@ final class BuildingSceneController: ObservableObject {
             ? BuildingModel.rectangularFootprint(area: building.footprintArea)
             : building.footprint
         torsion = TorsionModel.of(building)
+        cachedRing = nil
 
         addGround(size: max(building.footprintArea.squareRoot() * 6, 60))
 
@@ -197,12 +198,24 @@ final class BuildingSceneController: ObservableObject {
         // and this changes nothing.
         let planScales = building.massing.scales(storeys: solved.degreesOfFreedom)
 
-        for index in 0..<solved.degreesOfFreedom {
+        // The plan at each storey's own floor and ceiling, so a storey can be
+        // built as the solid between them rather than as a prism of one plan.
+        // Sampling only the middle — which is what `scales(storeys:)` gives —
+        // is right for the mass but wrong for the surface: it makes every
+        // change in plan happen as a step between floors.
+        let storeyCount = solved.degreesOfFreedom
+        func planScale(atLevel level: Int) -> Double {
+            building.massing.scale(at: Double(level) / Double(max(storeyCount, 1)))
+        }
+
+        for index in 0..<storeyCount {
             let height = solved.storeys[index].height
             let scale = index < planScales.count ? planScales[index] : 1
             let node = makeStorey(index: index, width: width * scale,
                                   depth: depth * scale, height: height,
-                                  planScale: scale)
+                                  planScale: scale,
+                                  bottomScale: planScale(atLevel: index),
+                                  topScale: planScale(atLevel: index + 1))
 
             // Position by the cumulative height of the storeys below, so a
             // base-isolation layer of 0.6 m does not push the whole tower up by
@@ -237,7 +250,8 @@ final class BuildingSceneController: ObservableObject {
     func resetCamera() { frameCamera() }
 
     private func makeStorey(index: Int, width: Double, depth: Double,
-                            height: Double, planScale: Double = 1) -> SCNNode {
+                            height: Double, planScale: Double = 1,
+                            bottomScale: Double = 1, topScale: Double = 1) -> SCNNode {
         // A slab plus a slightly inset body reads as a floor plate and a storey,
         // which is enough to make the massing legible without modelling columns.
         let container = SCNNode()
@@ -252,13 +266,21 @@ final class BuildingSceneController: ObservableObject {
         // spandrel, which is a line and not a ledge. On a tapered building the
         // overhang was worse than untidy: it turned a smooth slope into a
         // visible staircase.
+        // The body spans the storey's own floor to its ceiling; the slab sits
+        // at the top and takes the plan it finds there. Interpolating rather
+        // than sharing one plan is what stops a curved profile reading as a
+        // stack of trays.
+        let ceiling = bottomScale + (topScale - bottomScale) * 0.93
+
         let bodyNode = storeyNode(height: height * 0.93, inset: 0,
-                                  width: width, depth: depth, planScale: planScale)
+                                  width: width, depth: depth, planScale: planScale,
+                                  bottomScale: bottomScale, topScale: ceiling)
         bodyNode.name = "body"
         container.addChildNode(bodyNode)
 
         let slabNode = storeyNode(height: height * 0.07, inset: -0.005,
-                                  width: width, depth: depth, planScale: planScale)
+                                  width: width, depth: depth, planScale: planScale,
+                                  bottomScale: ceiling, topScale: topScale)
         slabNode.name = "slab"
         slabNode.position = SCNVector3(0, Float(height * 0.465), 0)
         container.addChildNode(slabNode)
@@ -283,25 +305,54 @@ final class BuildingSceneController: ObservableObject {
     /// user can recognise as their own building is the thing that makes the
     /// rest of the model believable.
     private func storeyNode(height: Double, inset: Double,
-                            width: Double, depth: Double, planScale: Double = 1) -> SCNNode {
-        let scale = (1 - inset) * planScale
+                            width: Double, depth: Double, planScale: Double = 1,
+                            bottomScale: Double = 1, topScale: Double = 1) -> SCNNode {
         let thickness = max(height, 0.01)
+        let insetFactor = 1 - inset
 
-        if let path = footprintPath(scale: scale) {
-            let shape = SCNShape(path: path, extrusionDepth: CGFloat(thickness))
-            shape.chamferRadius = 0
-            let node = SCNNode(geometry: shape)
-            // `SCNShape` lays its path in the xy plane and extrudes along z, so
-            // the solid comes out standing on its side. Rotating a quarter turn
-            // about x lays the plan flat and makes the extrusion vertical.
-            node.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
-            return node
+        // A lofted solid, so the plan changes across the storey rather than
+        // between storeys. `SCNShape` can only extrude one cross-section, which
+        // is what turned every curved profile into a ziggurat.
+        if let ring = centredRing(), !ring.points.isEmpty,
+           let geometry = Loft.solid(ring: ring.points, curved: ring.curved,
+                                     bottomScale: bottomScale * insetFactor,
+                                     topScale: topScale * insetFactor,
+                                     height: thickness) {
+            return SCNNode(geometry: geometry)
         }
 
+        let scale = insetFactor * planScale
         let box = SCNBox(width: CGFloat(width * scale), height: CGFloat(thickness),
                          length: CGFloat(depth * scale),
                          chamferRadius: CGFloat(min(width, depth) * 0.015))
         return SCNNode(geometry: box)
+    }
+
+    /// The plan centred on its centroid and densified, computed once per build.
+    ///
+    /// Every storey needs the same ring; flattening the curves and running the
+    /// arc detection sixty times over for a sixty-storey tower would be pure
+    /// waste.
+    private var cachedRing: (points: [Coordinate2D], curved: [Bool])?
+
+    private func centredRing() -> (points: [Coordinate2D], curved: [Bool])? {
+        if let cachedRing { return cachedRing }
+
+        let ring = OutlineCurvature.normalised(footprint)
+        guard ring.count >= 3 else { return nil }
+        let box = Polygon.boundingBox(ring)
+        guard box.max.x - box.min.x > 0.5, box.max.y - box.min.y > 0.5 else { return nil }
+
+        // Centred on the centroid, not the bounding box: each storey is this
+        // ring scaled, so whatever it is centred on is what the tower stacks
+        // about. For a triangle those are ten metres apart and the tower leans.
+        let centre = centroid(of: ring)
+        let centred = ring.map { Coordinate2D(x: $0.x - centre.x, y: $0.y - centre.y) }
+
+        let densified = Loft.densified(centred)
+        guard densified.points.count >= 3 else { return nil }
+        cachedRing = densified
+        return densified
     }
 
     /// The footprint as a path centred on the origin, or nil if it is too
@@ -310,71 +361,6 @@ final class BuildingSceneController: ObservableObject {
     /// Centring matters: the polygon arrives in metres relative to the
     /// building's anchor, so an un-centred path would put the tower off to one
     /// side of its own ground plane and out of the camera's framing.
-    /// Curves are drawn as curves, corners are kept sharp.
-    ///
-    /// The outline arrives as a list of points whichever way it was obtained —
-    /// traced from OpenStreetMap or generated from a plan shape — so a round
-    /// tower arrives as a run of short straight segments. Drawing those
-    /// literally is what made every curved building in the app come out
-    /// faceted, like a pencil. `OutlineCurvature` works out which runs of
-    /// points were meant to be a single curve, and those runs are emitted as
-    /// cubic Béziers through the same points.
-    ///
-    /// Through the same points, not near them: the vertices are survey data,
-    /// and a smoothing that moved them would be moving the building's walls.
-    private func footprintPath(scale: Double) -> UIBezierPath? {
-        let ring = OutlineCurvature.normalised(footprint)
-        guard ring.count >= 3 else { return nil }
-
-        let box = Polygon.boundingBox(ring)
-        guard box.max.x - box.min.x > 0.5, box.max.y - box.min.y > 0.5 else { return nil }
-
-        // Centred on the plan's centroid, not on its bounding box.
-        //
-        // Each storey is this same outline multiplied by the massing scale, so
-        // whatever point the path is centred on is the point the tower is
-        // stacked about. Those coincide for a rectangle or a circle, and for a
-        // triangle they are nearly ten metres apart — so every storey of the
-        // Tokyo Skytree was drawn with its centre of area displaced by ten
-        // metres times that storey's scale, and since the scale shrinks with
-        // height, the displacement shrank with it. The tower leaned.
-        //
-        // The centroid is also the structurally right choice: floors stack
-        // about their centres of mass.
-        let centre = centroid(of: ring)
-        let centreX = centre.x
-        let centreY = centre.y
-
-        // The polygon's y is a ground-plane axis; the extrusion happens along
-        // the shape's own z, and the node is rotated flat by the caller.
-        func place(_ point: Coordinate2D) -> CGPoint {
-            CGPoint(x: (point.x - centreX) * scale, y: (point.y - centreY) * scale)
-        }
-
-        guard let drawn = OutlineCurvature.path(for: ring) else { return nil }
-
-        let path = UIBezierPath()
-        path.move(to: place(drawn.start))
-        for segment in drawn.segments {
-            switch segment {
-            case .line(let to):
-                path.addLine(to: place(to))
-            case .curve(let to, let control1, let control2):
-                path.addCurve(to: place(to),
-                              controlPoint1: place(control1), controlPoint2: place(control2))
-            }
-        }
-        path.close()
-        // Flatness is how finely SceneKit tessellates those curves before
-        // extruding them, in points of allowed deviation. The old 0.15 was
-        // loose enough to reintroduce the faceting the curves were added to
-        // remove; this is fine enough that the silhouette reads as smooth and
-        // still an order of magnitude cheaper than tessellating by vertex
-        // count.
-        path.flatness = 0.02
-        return path
-    }
-
     /// Area centroid of a closed ring, by the shoelace formula.
     ///
     /// Falls back to the bounding-box centre for a degenerate outline, where
@@ -474,6 +460,17 @@ final class BuildingSceneController: ObservableObject {
         let sizeZ = maximum.z > minimum.z ? maximum.z - minimum.z : fallback
         let centreY = maximum.y > minimum.y ? (minimum.y + maximum.y) / 2 : height / 2
 
+        // Aim at where the building actually is, not at the origin.
+        //
+        // Each storey is the plan centred on its *centroid*, because that is
+        // what the storeys have to stack about — but the centroid of a U or an
+        // L is nowhere near the middle of its bounding box, so a camera pointed
+        // at the origin puts the long arm of a courtyard block off the side of
+        // the screen. For a rectangle or a circle these are the same point and
+        // this changes nothing.
+        let centreX = maximum.x > minimum.x ? (minimum.x + maximum.x) / 2 : 0
+        let centreZ = maximum.z > minimum.z ? (minimum.z + maximum.z) / 2 : 0
+
         // Fit the bounding sphere. Slightly generous for a long thin plan, since
         // it uses the diagonal, but it holds for every viewing angle — and the
         // camera can be orbited to any of them.
@@ -488,9 +485,9 @@ final class BuildingSceneController: ObservableObject {
         let limiting = min(vertical, horizontal)
         let distance = radius / sin(limiting / 2) * margin
 
-        cameraNode.position = SCNVector3(distance * 0.42, centreY + radius * 0.55,
-                                         distance * 0.63)
-        cameraNode.look(at: SCNVector3(0, centreY, 0))
+        cameraNode.position = SCNVector3(centreX + distance * 0.42, centreY + radius * 0.55,
+                                         centreZ + distance * 0.63)
+        cameraNode.look(at: SCNVector3(centreX, centreY, centreZ))
     }
 
     // MARK: Styling
@@ -511,6 +508,13 @@ final class BuildingSceneController: ObservableObject {
     private func material(for style: VisualStyle, fraction: Double, isSlab: Bool) -> SCNMaterial {
         let material = SCNMaterial()
         material.lightingModel = .physicallyBased
+        // The storeys are lofted solids built here rather than extruded by
+        // SceneKit, so the triangle winding is this code's responsibility. It
+        // is normalised when the mesh is built; this makes a residual
+        // disagreement invisible rather than a hole in the side of a building.
+        // Nothing inside a storey is ever seen, so the cost is a few hidden
+        // faces that would have been culled.
+        material.isDoubleSided = true
 
         switch style {
         case .realistic:
