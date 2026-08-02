@@ -306,12 +306,66 @@ struct SensorChannelsScreen: View {
 
     // MARK: The three supporting channels
 
+    /// Only the channels the board is actually reporting.
+    ///
+    /// A sensor that is not fitted, or whose divider is reading a rail, has
+    /// nothing to say — and a panel of warnings about hardware that is not
+    /// there is a worse answer than a shorter list. They come back on their own
+    /// the moment they start reporting, because this is derived from live
+    /// telemetry rather than from a setting somebody has to remember to change.
+    ///
+    /// What is missing is still named, once, at the bottom. Hiding a dead
+    /// sensor is tidy; pretending the node has six working channels when it has
+    /// five would be a lie, and this screen's whole argument is that each
+    /// channel is independently accountable.
+    @ViewBuilder
     private var supportingChannels: some View {
         VStack(spacing: Theme.Metrics.spacingLoose) {
             occupancyChannel
-            temperatureChannel
-            photoresistorChannel
+            if isTemperatureReporting { temperatureChannel }
+            if isPhotoresistorReporting { photoresistorChannel }
+
+            if !absentChannels.isEmpty {
+                Text(absentSentence)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
+    }
+
+    /// The thermistor announces its own failure: the firmware sends −99 when
+    /// the divider reads a rail, which means open or shorted rather than very
+    /// cold.
+    private var isTemperatureReporting: Bool {
+        link.telemetry?.isTemperatureValid ?? false
+    }
+
+    /// A photoresistor that is not fitted leaves the analogue pin floating, and
+    /// a floating pin sits at one rail or the other. A real cell in a real room
+    /// is never at either.
+    private var isPhotoresistorReporting: Bool {
+        guard let reading = link.telemetry?.photoresistor else { return false }
+        return reading > 2 && reading < 1021
+    }
+
+    private var absentChannels: [String] {
+        var missing: [String] = []
+        if !isTemperatureReporting { missing.append("the thermistor") }
+        if !isPhotoresistorReporting { missing.append("the photoresistor") }
+        return missing
+    }
+
+    private var absentSentence: String {
+        let list = absentChannels.count > 1
+            ? absentChannels.dropLast().joined(separator: ", ") + " and " + absentChannels[absentChannels.count - 1]
+            : absentChannels.first ?? ""
+        let verb = absentChannels.count > 1 ? "are" : "is"
+        return "\(list.capitalisedSentence) \(verb) not reporting, so \(absentChannels.count > 1 ? "those channels are" : "that channel is") not shown. "
+            + "They appear here the moment the board starts sending values for them. "
+            + "Without the thermistor a period comparison carries the seasonal drift "
+            + "uncorrected, which the assessment says where it matters."
     }
 
     private var occupancyChannel: some View {
@@ -486,5 +540,13 @@ struct SensorChannelsScreen: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .instrumentPanel()
+    }
+}
+
+
+private extension String {
+    var capitalisedSentence: String {
+        guard let first else { return self }
+        return String(first).uppercased() + dropFirst()
     }
 }

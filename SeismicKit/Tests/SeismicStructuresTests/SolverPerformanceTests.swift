@@ -35,7 +35,13 @@ final class SolverPerformanceTests: XCTestCase {
         let elapsed = Date().timeIntervalSince(start)
 
         XCTAssertGreaterThan(result.maximumDrift, 0, "The solve produced nothing")
-        XCTAssertLessThan(elapsed, 4.0,
+        // Loose on purpose: this is a canary for the stiffness matrix being
+        // re-eliminated every step instead of factorised once, which costs
+        // orders of magnitude rather than a factor of two. The test below,
+        // which compares cost at two sizes, is the strict one — a ratio does
+        // not care how fast the machine is, and that is exactly the property
+        // wall-clock lacks.
+        XCTAssertLessThan(elapsed, 12.0,
                           "A 40-storey solve took \(String(format: "%.1f", elapsed)) s — the "
                           + "effective stiffness matrix is probably being re-eliminated every "
                           + "step instead of factorised once")
