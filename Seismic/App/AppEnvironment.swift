@@ -880,13 +880,54 @@ final class AppEnvironment: ObservableObject {
         Haptics.shared.play(.eventTriggered)
     }
 
+    /// Softens the model, so a re-measurement finds a longer period.
+    ///
+    /// Only the simulator can do this, and that is not a limitation to work
+    /// around — you cannot damage a real building to order, and a *pretend*
+    /// damage flag on a real node would put a fabricated verdict next to
+    /// measured ones. Said plainly instead of failing silently, which is what
+    /// it did: on hardware `simulatedNode` is nil and this was a button that
+    /// looked enabled and did nothing at all.
     func introduceSimulatedDamage() {
-        simulatedNode?.introduceSimulatedDamage()
+        guard let simulatedNode else {
+            appendLog("Only the simulator can be damaged on demand. A real node measures a real "
+                      + "building, and inventing a stiffness loss it never saw would put a made-up "
+                      + "verdict beside measured ones. Switch to the simulator to show this.")
+            return
+        }
+        simulatedNode.introduceSimulatedDamage()
         appendLog("Simulated damage introduced. Re-measure to see the assessment change.")
     }
 
-    func simulateConnectionLoss() { simulatedNode?.simulateConnectionLoss() }
-    func restoreConnection() { simulatedNode?.restoreConnection() }
+    /// Drops the link, to show that the node carries on without the phone.
+    ///
+    /// On real hardware this is not simulated at all — it genuinely
+    /// disconnects the radio, which is a better demonstration than pretending
+    /// to: the board really does keep detecting, really does keep acting, and
+    /// really does hold its recording until the link returns.
+    func simulateConnectionLoss() {
+        if let simulatedNode {
+            simulatedNode.simulateConnectionLoss()
+            return
+        }
+        guard sensorSource == .node else {
+            appendLog("Nothing to disconnect — this phone's own accelerometer has no link to "
+                      + "drop.")
+            return
+        }
+        appendLog("Dropping the link deliberately. The node carries on detecting and acting "
+                  + "without the phone, and holds its recording until this comes back.")
+        link.disconnect()
+    }
+
+    func restoreConnection() {
+        if let simulatedNode {
+            simulatedNode.restoreConnection()
+            return
+        }
+        appendLog("Looking for the node again.")
+        link.startScanning()
+    }
 
     private func completeRecording(eventID: UUID, result: ChunkReassembler.Result) {
         appendLog(result.summary)
