@@ -135,6 +135,11 @@ and the live earthquake feed work on a fresh install with an empty `.env`.
 
 ## Demonstrating it
 
+`PRESENTING.md` is a 3½-minute script with times, the exact lines that land,
+what to check five minutes beforehand, and the four questions an audience
+actually asks.
+
+
 Node → Demonstration has explicit controls to inject a magnitude 6.4 nearby, a
 distant magnitude 7.4, structural damage, and a connection drop mid-event. These
 are labelled and in the open rather than hidden behind a debug flag, because the
