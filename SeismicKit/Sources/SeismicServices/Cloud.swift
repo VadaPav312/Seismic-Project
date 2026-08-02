@@ -538,6 +538,63 @@ public actor CloudService {
                                               + "neighbourhood.")
         }
     }
+
+    /// Publishes one building's verdict to the neighbourhood.
+    ///
+    /// The half of the community map that was missing. Reading everybody's
+    /// tags without ever being able to add your own makes the feature a
+    /// broadcast rather than a network — and the map's whole premise is that
+    /// after an earthquake there are not enough engineers, so what people can
+    /// establish about their own buildings is the only thing that scales.
+    ///
+    /// Failure is reported rather than swallowed. The tag is written locally
+    /// either way, so nothing is lost and it can go out with the next sync,
+    /// but somebody who believes they have warned their street deserves to
+    /// know when they have not.
+    public func publish(_ tag: CommunityTag) async -> Sourced<Bool> {
+        guard isConfigured else {
+            return Sourced(false, origin: .onDevice, provider: "None",
+                           note: "No community service is configured, so this is saved on this "
+                               + "device and shared with nobody. It is still on your own map.")
+        }
+        do {
+            try await push(table: "community_tags", payload: try JSONEncoder().encode([tag]))
+            return Sourced(true, origin: .live, provider: "Supabase")
+        } catch {
+            return Sourced(false, origin: .onDevice, provider: "None",
+                           note: "It could not be published just now. It is saved on this device "
+                               + "and will go out with the next sync.")
+        }
+    }
+
+    /// Agreeing or disputing somebody else's report.
+    ///
+    /// Kept as a separate row per voter rather than an incremented counter on
+    /// the tag, so one person cannot move a verdict by pressing a button
+    /// repeatedly — which is the obvious way to abuse a map that people are
+    /// going to make sheltering decisions from.
+    public func vote(onTag id: UUID, agree: Bool) async -> Sourced<Bool> {
+        guard isConfigured, let voter = session?.account.id else {
+            return Sourced(false, origin: .onDevice, provider: "None",
+                           note: "Recorded on this device. Sharing votes needs an account.")
+        }
+        struct Vote: Encodable {
+            var tagID: String
+            var voterID: String
+            var agree: Bool
+            var votedAt: Date
+        }
+        do {
+            let payload = try JSONEncoder().encode([
+                Vote(tagID: id.uuidString, voterID: voter, agree: agree, votedAt: Date()),
+            ])
+            try await push(table: "community_tag_votes", payload: payload)
+            return Sourced(true, origin: .live, provider: "Supabase")
+        } catch {
+            return Sourced(false, origin: .onDevice, provider: "None",
+                           note: "The vote could not be sent just now.")
+        }
+    }
 }
 
 struct GoTrueSession: Decodable {

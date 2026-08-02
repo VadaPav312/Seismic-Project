@@ -99,6 +99,28 @@ final class ServiceHub: ObservableObject {
         isRefreshingFeed = false
     }
 
+    /// What has happened near any point on Earth, over any window of years.
+    ///
+    /// Passed straight through rather than cached here — the service does its
+    /// own caching, keyed on a rounded coordinate, so panning a map back and
+    /// forth over the same city does not re-query the catalogue.
+    func history(latitude: Double, longitude: Double,
+                 radiusKm: Double = 250, years: Double = 10) async -> Sourced<RegionalHistory> {
+        await feed.history(latitude: latitude, longitude: longitude,
+                           radiusKm: radiusKm, years: years)
+    }
+
+    // MARK: The community map
+
+    /// Publishes a verdict to the neighbourhood.
+    func publish(_ tag: CommunityTag) async -> Sourced<Bool> {
+        await cloud.publish(tag)
+    }
+
+    func vote(onTag id: UUID, agree: Bool) async -> Sourced<Bool> {
+        await cloud.vote(onTag: id, agree: agree)
+    }
+
     // MARK: Narrative
 
     /// Produces the paragraph under a verdict.

@@ -67,6 +67,96 @@ public actor EarthquakeFeedService {
         }
     }
 
+    // MARK: History anywhere on Earth
+
+    /// Every earthquake near a point, over a window of years.
+    ///
+    /// The summary feeds above cover the whole world but only the recent past,
+    /// and only as a fixed list. This is the FDSN event service, which is the
+    /// same catalogue queried properly: any coordinate, any radius, any time
+    /// range, back to the beginning of the instrumental record. Also keyless,
+    /// which is what makes a "tap anywhere and see the history" map possible
+    /// for every user rather than only for one with an account.
+    ///
+    /// The magnitude floor scales with the radius on purpose. A 300 km circle
+    /// around Tokyo contains tens of thousands of magnitude 2 events over ten
+    /// years, which is a slow query returning a list nobody can read; the
+    /// events that tell you what a place is like are the ones large enough to
+    /// have been felt.
+    public func history(latitude: Double, longitude: Double,
+                        radiusKm: Double = 250, years: Double = 10,
+                        minimumMagnitude: Double? = nil,
+                        limit: Int = 500) async -> Sourced<RegionalHistory> {
+        let key = HistoryKey(latitude: (latitude * 20).rounded() / 20,
+                             longitude: (longitude * 20).rounded() / 20,
+                             radiusKm: radiusKm, years: years)
+        if let hit = historyCache[key], Date().timeIntervalSince(hit.fetchedAt) < 900 {
+            return Sourced(hit.history, origin: .cached, provider: "USGS")
+        }
+
+        let floor = minimumMagnitude ?? Self.magnitudeFloor(forRadiusKm: radiusKm)
+        let start = Date(timeIntervalSinceNow: -years * 365.25 * 86_400)
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+
+        var components = URLComponents(
+            string: "https://earthquake.usgs.gov/fdsnws/event/1/query")!
+        components.queryItems = [
+            URLQueryItem(name: "format", value: "geojson"),
+            URLQueryItem(name: "latitude", value: String(format: "%.4f", latitude)),
+            URLQueryItem(name: "longitude", value: String(format: "%.4f", longitude)),
+            URLQueryItem(name: "maxradiuskm", value: String(format: "%.0f", radiusKm)),
+            URLQueryItem(name: "starttime", value: formatter.string(from: start)),
+            URLQueryItem(name: "minmagnitude", value: String(format: "%.1f", floor)),
+            URLQueryItem(name: "orderby", value: "magnitude"),
+            URLQueryItem(name: "limit", value: String(limit)),
+        ]
+        guard let url = components.url else {
+            return Sourced(.empty(radiusKm: radiusKm, years: years, floor: floor),
+                           origin: .onDevice, provider: "None",
+                           note: "That location could not be turned into a query.")
+        }
+
+        do {
+            let response: USGSFeed = try await client.json(HTTPRequest(url: url, timeout: 25),
+                                                           as: USGSFeed.self)
+            let history = RegionalHistory(features: response.features, radiusKm: radiusKm,
+                                          years: years, magnitudeFloor: floor)
+            historyCache[key] = (Date(), history)
+            // An empty answer here is information, not a failure: most of the
+            // Earth's surface genuinely has had no felt earthquake in ten
+            // years, and saying so is the useful reply.
+            return Sourced(history, origin: .live, provider: "USGS")
+        } catch {
+            if let hit = historyCache[key] {
+                return Sourced(hit.history, origin: .cached, provider: "USGS",
+                               note: "The catalogue did not answer; showing the last result.")
+            }
+            return Sourced(.empty(radiusKm: radiusKm, years: years, floor: floor),
+                           origin: .onDevice, provider: "None",
+                           note: "The earthquake catalogue could not be reached. It needs a "
+                               + "network connection; nothing else in the app does.")
+        }
+    }
+
+    /// Larger area, higher floor. Keeps the answer readable and the query fast.
+    static func magnitudeFloor(forRadiusKm radius: Double) -> Double {
+        switch radius {
+        case ..<60: 2.5
+        case ..<150: 3.5
+        case ..<400: 4.5
+        default: 5.5
+        }
+    }
+
+    private struct HistoryKey: Hashable {
+        var latitude: Double
+        var longitude: Double
+        var radiusKm: Double
+        var years: Double
+    }
+    private var historyCache: [HistoryKey: (fetchedAt: Date, history: RegionalHistory)] = [:]
+
     static func record(from feature: USGSFeed.Feature) -> EarthquakeRecord? {
         guard let magnitude = feature.properties.mag,
               feature.geometry.coordinates.count >= 3 else { return nil }
@@ -101,6 +191,155 @@ public actor EarthquakeFeedService {
     }
 }
 
+/// What has happened near a point, and what it did.
+///
+/// Assembled from the catalogue rather than stored, so the same structure works
+/// for anywhere on Earth without a database of places behind it.
+///
+/// The impact figures deserve a note, because it would be easy to overclaim
+/// here. The USGS does not publish a count of collapsed buildings, and no free
+/// source does; what it publishes is PAGER, its own model-based estimate of the
+/// losses an earthquake caused, as a four-level alert. That is a real,
+/// authoritative signal of which events damaged buildings, and it is reported
+/// as what it is. Inventing collapse counts to fill the gap would be worse than
+/// leaving it open.
+public struct RegionalHistory: Sendable, Equatable {
+
+    /// Estimated impact, on the USGS's own scale.
+    public enum Impact: String, Sendable, Comparable, CaseIterable {
+        case none, green, yellow, orange, red
+
+        public static func < (a: Impact, b: Impact) -> Bool {
+            let order: [Impact] = [.none, .green, .yellow, .orange, .red]
+            return (order.firstIndex(of: a) ?? 0) < (order.firstIndex(of: b) ?? 0)
+        }
+
+        /// What the level actually means, in the USGS's own terms.
+        public var meaning: String {
+            switch self {
+            case .none: "No loss estimate was published for this event."
+            case .green: "No significant damage expected."
+            case .yellow: "Local damage expected — some buildings damaged, few or no deaths."
+            case .orange: "Significant damage expected — many buildings damaged, "
+                + "deaths in the hundreds."
+            case .red: "Extensive damage — widespread collapse, deaths potentially "
+                + "in the thousands."
+            }
+        }
+
+        /// Whether buildings are expected to have been damaged.
+        public var damagedBuildings: Bool { self >= .yellow }
+    }
+
+    /// One event, with the parts of it a person looking at a map cares about.
+    public struct Event: Sendable, Equatable, Identifiable {
+        public var id: String
+        public var record: EarthquakeRecord
+        public var impact: Impact
+        /// Peak instrumental intensity, Modified Mercalli, where measured.
+        public var shaking: Double?
+        /// How many people reported feeling it.
+        public var felt: Int?
+        public var causedTsunami: Bool
+
+        public var magnitude: Double { record.magnitude }
+        public var date: Date { record.originTime ?? Date.distantPast }
+        public var place: String { record.name }
+    }
+
+    public var events: [Event]
+    public var radiusKm: Double
+    public var years: Double
+    public var magnitudeFloor: Double
+
+    public init(events: [Event], radiusKm: Double, years: Double, magnitudeFloor: Double) {
+        self.events = events
+        self.radiusKm = radiusKm
+        self.years = years
+        self.magnitudeFloor = magnitudeFloor
+    }
+
+    public static func empty(radiusKm: Double, years: Double, floor: Double) -> RegionalHistory {
+        RegionalHistory(events: [], radiusKm: radiusKm, years: years, magnitudeFloor: floor)
+    }
+
+    init(features: [USGSFeed.Feature], radiusKm: Double, years: Double, magnitudeFloor: Double) {
+        self.events = features.compactMap { feature in
+            guard let record = EarthquakeFeedService.record(from: feature) else { return nil }
+            return Event(
+                id: feature.id ?? UUID().uuidString,
+                record: record,
+                impact: feature.properties.alert.flatMap(Impact.init(rawValue:)) ?? .none,
+                shaking: feature.properties.mmi ?? feature.properties.cdi,
+                felt: feature.properties.felt,
+                causedTsunami: (feature.properties.tsunami ?? 0) > 0)
+        }
+        self.radiusKm = radiusKm
+        self.years = years
+        self.magnitudeFloor = magnitudeFloor
+    }
+
+    // MARK: What it says
+
+    public var largest: Event? { events.max { $0.magnitude < $1.magnitude } }
+    public var mostRecent: Event? { events.max { $0.date < $1.date } }
+
+    /// Events the USGS estimated caused damage to buildings.
+    public var damaging: [Event] {
+        events.filter { $0.impact.damagedBuildings }.sorted { $0.impact > $1.impact }
+    }
+
+    /// Events per year above magnitude 5, which is roughly where a well-built
+    /// modern building starts to care and a poorly-built one starts to fail.
+    public var annualRateAboveFive: Double {
+        guard years > 0 else { return 0 }
+        return Double(events.filter { $0.magnitude >= 5 }.count) / years
+    }
+
+    public var worstImpact: Impact { events.map(\.impact).max() ?? .none }
+
+    /// The whole thing in a sentence or two, which is what a tap on a map
+    /// should answer with before any list.
+    public var narrative: String {
+        guard !events.isEmpty else {
+            return "No earthquake above magnitude "
+                + String(format: "%.1f", magnitudeFloor)
+                + " has been recorded within \(Int(radiusKm)) km of here in the last "
+                + "\(Int(years)) years. That is the case for most of the Earth's surface."
+        }
+
+        var parts: [String] = []
+        parts.append("\(events.count) earthquake\(events.count == 1 ? "" : "s") above magnitude "
+                     + String(format: "%.1f", magnitudeFloor)
+                     + " within \(Int(radiusKm)) km in \(Int(years)) years.")
+
+        if let largest {
+            let year = Calendar(identifier: .gregorian)
+                .dateComponents([.year], from: largest.date).year ?? 0
+            parts.append("The largest was magnitude "
+                         + String(format: "%.1f", largest.magnitude)
+                         + " in \(year), \(largest.place).")
+        }
+
+        let damaging = damaging
+        if damaging.isEmpty {
+            parts.append("None of them was estimated to have damaged buildings.")
+        } else {
+            parts.append("\(damaging.count) of them "
+                         + (damaging.count == 1 ? "was" : "were")
+                         + " estimated to have damaged buildings. "
+                         + (worstImpact.meaning))
+        }
+
+        let rate = annualRateAboveFive
+        if rate >= 0.1 {
+            parts.append(String(format: "That is about %.1f events above magnitude 5 a year.",
+                                rate))
+        }
+        return parts.joined(separator: " ")
+    }
+}
+
 public struct USGSFeed: Decodable, Sendable {
     public struct Feature: Decodable, Sendable {
         public struct Properties: Decodable, Sendable {
@@ -108,12 +347,23 @@ public struct USGSFeed: Decodable, Sendable {
             public var place: String?
             public var time: Double?
             public var tsunami: Int?
+            /// PAGER alert level: the USGS's own estimate of the losses this
+            /// event caused. The closest thing to authoritative damage data
+            /// that exists without a key.
+            public var alert: String?
+            /// Peak instrumental intensity, Modified Mercalli.
+            public var mmi: Double?
+            /// Community-reported intensity, from "Did You Feel It?".
+            public var cdi: Double?
+            public var felt: Int?
         }
         public struct Geometry: Decodable, Sendable {
             public var coordinates: [Double]
         }
         public var properties: Properties
         public var geometry: Geometry
+        /// The catalogue's own identifier, stable across refetches.
+        public var id: String?
     }
     public var features: [Feature]
 }
