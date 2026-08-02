@@ -234,6 +234,10 @@ final class SeismicNodeLink: NSObject, ObservableObject {
     /// "no longer visible" the moment they are tapped.
     private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
 
+    /// Scan results as they arrive, published to `discovered` on a timer.
+    private var pendingDiscoveries: [UUID: DiscoveredPeripheral] = [:]
+    private var discoveryFlush: AnyCancellable?
+
     private var scanTimeoutTask: Task<Void, Never>?
     private var signalTask: Task<Void, Never>?
 
@@ -646,6 +650,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         simulator = nil
         discovered = []
         discoveredPeripherals = [:]
+        pendingDiscoveries = [:]
         connection = .scanning
         if central == nil {
             // Created lazily rather than at launch, so the system permission
@@ -662,6 +667,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func stopScanning() {
         scanTimeoutTask?.cancel()
+        stopPublishingDiscoveries()
         central?.stopScan()
         if case .scanning = connection { connection = .disconnected }
     }
@@ -678,6 +684,8 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         // phone that anything is wrong. Everything is listed instead, with the
         // ones that did advertise the service ranked to the top.
         discovered = []
+        pendingDiscoveries = [:]
+        startPublishingDiscoveries()
         central?.scanForPeripherals(withServices: nil,
                                     options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
         note("Scanning. Everything nearby is listed, because these serial modules usually "
@@ -694,6 +702,8 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
                 // expensive to leave running. Twenty seconds is long enough to
                 // find a board on the same bench.
                 self.central?.stopScan()
+                self.stopPublishingDiscoveries()
+                self.discovered = Array(self.pendingDiscoveries.values)
                 if self.discovered.isEmpty {
                     self.fault("Twenty seconds of scanning found nothing at all. The board is "
                                + "either unpowered, out of range, or its BLE module is not "
@@ -721,6 +731,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
             return
         }
         scanTimeoutTask?.cancel()
+        stopPublishingDiscoveries()
         resetState()
         source = .bluetooth
         rememberedIdentifier = id
@@ -762,6 +773,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
     private func teardownBluetooth() {
         reconnectTask?.cancel()
         scanTimeoutTask?.cancel()
+        stopPublishingDiscoveries()
         signalTask?.cancel()
         central?.stopScan()
         peripheral = nil
@@ -805,7 +817,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
     // MARK: Central delegate
 
     nonisolated func centralManagerDidUpdateState(_ central: CBCentralManager) {
-        Task { @MainActor in
+        onMain { [self] in
             switch central.state {
             case .poweredOn:
                 // Reconnect to the remembered node without being asked. Coming
@@ -827,6 +839,30 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         }
     }
 
+    /// Runs `body` on the main actor without allocating a task when it is
+    /// already there.
+    ///
+    /// Every CoreBluetooth callback in this file used `onMain { }`,
+    /// and the central is created with `queue: .main` — so the callback was
+    /// *already* on the main actor and the hop bought nothing but an
+    /// allocation. That was survivable for connection events and fatal for the
+    /// two that arrive in floods.
+    ///
+    /// Scanning with duplicates on, in a room with thirty Bluetooth devices in
+    /// it, delivers advertisements faster than the main actor drains its queue.
+    /// Each one enqueued another task, the queue grew without bound, and iOS
+    /// killed the process for memory — "Terminated due to memory issue", within
+    /// a few seconds of the device list appearing. The same shape of failure
+    /// waits on `didUpdateValueFor`, which fires once per BLE notification
+    /// packet for as long as the node is streaming.
+    private nonisolated func onMain(_ body: @escaping @MainActor () -> Void) {
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { body() }
+        } else {
+            onMain { body() }
+        }
+    }
+
     nonisolated func centralManager(_ central: CBCentralManager,
                                     didDiscover peripheral: CBPeripheral,
                                     advertisementData: [String: Any],
@@ -845,29 +881,60 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
             (advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber)?.boolValue ?? true
         let id = peripheral.identifier
         let rssi = RSSI.intValue
-        Task { @MainActor in
+        onMain { [self] in
             // Held strongly, or CoreBluetooth deallocates it and connecting
             // later becomes impossible.
             self.discoveredPeripherals[id] = peripheral
-            if let index = discovered.firstIndex(where: { $0.id == id }) {
+
+            // Into a plain dictionary, not the published array. Advertisements
+            // arrive far faster than anybody can read a list, and publishing
+            // each one re-runs every observing view — with thirty devices in
+            // the room that is a redraw storm on top of a radio callback. The
+            // flush below is what the interface actually sees.
+            if var existing = self.pendingDiscoveries[id] {
                 // RSSI only; the name is not overwritten, because a duplicate
                 // advertisement often omits it and the entry would flicker
                 // between its name and "Unnamed device".
-                discovered[index].rssi = rssi
-                discovered[index].lastSeen = Date()
-                if isNode { discovered[index].advertisesNodeService = true }
+                existing.rssi = rssi
+                existing.lastSeen = Date()
+                if isNode { existing.advertisesNodeService = true }
+                self.pendingDiscoveries[id] = existing
             } else {
-                discovered.append(DiscoveredPeripheral(id: id, name: name, rssi: rssi,
-                                                       lastSeen: Date(),
-                                                       advertisesNodeService: isNode,
-                                                       isConnectable: connectable))
+                self.pendingDiscoveries[id] = DiscoveredPeripheral(
+                    id: id, name: name, rssi: rssi, lastSeen: Date(),
+                    advertisesNodeService: isNode, isConnectable: connectable)
             }
         }
     }
 
+    /// Publishes the scan results a few times a second rather than per packet.
+    ///
+    /// Four hertz: fast enough that a device appears the moment you look for
+    /// it, slow enough that a busy room costs four redraws a second instead of
+    /// several hundred.
+    private func startPublishingDiscoveries() {
+        discoveryFlush?.cancel()
+        discoveryFlush = Timer.publish(every: 0.25, on: .main, in: .common)
+            .autoconnect()
+            .sink { [weak self] _ in
+                guard let self else { return }
+                let latest = Array(self.pendingDiscoveries.values)
+                // Compared before assigning: an idle scan finds the same
+                // devices with the same signal for minutes at a time, and
+                // republishing an identical array redraws the list for nothing.
+                guard latest != self.discovered else { return }
+                self.discovered = latest
+            }
+    }
+
+    private func stopPublishingDiscoveries() {
+        discoveryFlush?.cancel()
+        discoveryFlush = nil
+    }
+
     nonisolated func centralManager(_ central: CBCentralManager,
                                     didConnect peripheral: CBPeripheral) {
-        Task { @MainActor in
+        onMain { [self] in
             reconnectAttempt = 0
             connection = .connected(rssi: -60)
             note("Connected. Reading the node's services.")
@@ -900,7 +967,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
                                 didReadRSSI RSSI: NSNumber,
                                 error: Error?) {
         let rssi = RSSI.intValue
-        Task { @MainActor in
+        onMain { [self] in
             guard self.notifyCharacteristic != nil || self.connection.isLive else { return }
             self.connection = rssi < -85 ? .weakSignal(rssi: rssi) : .connected(rssi: rssi)
         }
@@ -910,7 +977,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
                                     didFailToConnect peripheral: CBPeripheral,
                                     error: Error?) {
         let reason = error?.localizedDescription
-        Task { @MainActor in
+        onMain { [self] in
             self.fault("Could not connect" + (reason.map { ": \($0)" } ?? "."))
             self.scheduleReconnect()
         }
@@ -919,7 +986,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
     nonisolated func centralManager(_ central: CBCentralManager,
                                     didDisconnectPeripheral peripheral: CBPeripheral,
                                     error: Error?) {
-        Task { @MainActor in
+        onMain { [self] in
             writeCharacteristic = nil
             notifyCharacteristic = nil
             pendingServiceDiscoveries = 0
@@ -966,14 +1033,14 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
     nonisolated func peripheral(_ peripheral: CBPeripheral,
                                 didDiscoverServices error: Error?) {
         if let error {
-            Task { @MainActor in
+            onMain { [self] in
                 self.fault("Could not read the node's services: \(error.localizedDescription)")
             }
             return
         }
         let services = peripheral.services ?? []
         guard !services.isEmpty else {
-            Task { @MainActor in
+            onMain { [self] in
                 self.fault("The node connected but exposes no services at all. That is a module "
                            + "in command mode rather than transparent mode — it needs AT+ROLE0 "
                            + "and a power cycle.")
@@ -983,7 +1050,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         // Every service's characteristics, then one decision across all of
         // them. Discovering all of them costs one round trip each and means an
         // unrecognised module still works.
-        Task { @MainActor in
+        onMain { [self] in
             self.pendingServiceDiscoveries = services.count
             self.note("Connected. Reading \(services.count) "
                       + "service\(services.count == 1 ? "" : "s").")
@@ -1018,7 +1085,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
     nonisolated func peripheral(_ peripheral: CBPeripheral,
                                 didDiscoverCharacteristicsFor service: CBService,
                                 error: Error?) {
-        Task { @MainActor in
+        onMain { [self] in
             self.pendingServiceDiscoveries -= 1
             guard self.pendingServiceDiscoveries <= 0, self.notifyCharacteristic == nil else {
                 return
@@ -1123,7 +1190,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
                                 didWriteValueFor characteristic: CBCharacteristic,
                                 error: Error?) {
         guard let error else { return }
-        Task { @MainActor in
+        onMain { [self] in
             self.fault("A command was not accepted by the node: \(error.localizedDescription)")
         }
     }
@@ -1132,20 +1199,20 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
                                 didUpdateValueFor characteristic: CBCharacteristic,
                                 error: Error?) {
         if let error {
-            Task { @MainActor in
+            onMain { [self] in
                 self.fault("The node's stream reported an error: \(error.localizedDescription)")
             }
             return
         }
         guard let data = characteristic.value else { return }
-        Task { @MainActor in self.consume(data) }
+        onMain { self.consume(data) }
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral,
                                 didUpdateNotificationStateFor characteristic: CBCharacteristic,
                                 error: Error?) {
         guard let error else { return }
-        Task { @MainActor in
+        onMain { [self] in
             // Without notifications the link is one-way: commands go out and
             // nothing ever comes back, which reads on screen as a node that
             // has stopped rather than a subscription that failed.
