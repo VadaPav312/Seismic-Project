@@ -564,7 +564,7 @@ struct SimulatorScreen: View {
     /// replaying the record they already saw.
     @ViewBuilder
     private var capacityControl: some View {
-        if let building {
+        if building != nil {
             VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
                 SectionLabel("How much it could take", systemImage: "gauge.with.needle")
 

@@ -1226,7 +1226,13 @@ struct AnalysisScreen: View {
     /// fault patch produces very nearly the *same* waveform at the *same*
     /// station — same path, same site response. A generic template throws that
     /// away and becomes an expensive energy detector.
-    private static func selfTemplatedAftershocks(in w: Waveform) -> [MatchedFilter.Detection] {
+    /// `nonisolated` because it is pure arithmetic and is called from the
+    /// background task that runs this whole analysis. A `@MainActor` view's
+    /// statics are main-actor-isolated by default, which would drag a
+    /// matched filter over the entire record onto the main thread — or,
+    /// under Swift 6, refuse to compile.
+    private nonisolated static func selfTemplatedAftershocks(
+        in w: Waveform) -> [MatchedFilter.Detection] {
         let templateSamples = Int(min(20 * w.sampleRate, Double(w.count) / 4))
         guard templateSamples >= 200, w.count > templateSamples * 3 else { return [] }
 

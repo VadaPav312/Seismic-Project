@@ -237,29 +237,25 @@ final class SeismicNodeLink: NSObject, ObservableObject {
     private var scanTimeoutTask: Task<Void, Never>?
     private var signalTask: Task<Void, Never>?
 
-    static let serviceUUID = CBUUID(string: "FFE0")
-    static let characteristicUUID = CBUUID(string: "FFE1")
+    /// `nonisolated` because the CoreBluetooth delegate callbacks are, and a
+    /// `@MainActor` type's statics are main-actor-isolated by default —
+    /// reading one from `didDiscover` is a warning today and an error under
+    /// Swift 6.
+    nonisolated static let characteristicUUID = CBUUID(string: "FFE1")
 
-    /// Nordic UART, which is two characteristics rather than one.
-    static let nordicService = CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
-    /// The module's transmit, so the phone's *receive*.
-    static let nordicNotify = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
-    static let nordicWrite = CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
-
-    /// The serial services these modules actually ship with.
+    /// Whether an advertised service is one the protocol is known to run over.
     ///
-    /// FFE0/FFE1 is what the HM-10 and its clones use and what `arduino.ino`
-    /// is written against, but the same firmware behind a Nordic UART module
-    /// speaks exactly the same newline-delimited protocol over a different
-    /// UUID. Preferring FFE0 and accepting the others costs nothing and means
-    /// the app is not defeated by which module happened to be in the drawer.
-    static let knownSerialServices: [CBUUID] = [
-        CBUUID(string: "FFE0"),
-        CBUUID(string: "FFE1"),
-        CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"),   // Nordic UART
-        CBUUID(string: "0000FFE0-0000-1000-8000-00805F9B34FB"),   // some stacks report long form
-        CBUUID(string: "49535343-FE7D-4AE5-8FA9-9FAFD205E455"),   // Microchip RN4870
-    ]
+    /// Only a hint for sorting the scan list — the actual choice is made after
+    /// connecting, from the characteristics' properties. The list itself lives
+    /// in `BluetoothSerial` so there is one copy of it, and the comparison goes
+    /// through `same` rather than `==`: a stack that reports FFE0 in its long
+    /// 128-bit form would otherwise fail to match the short one and the node
+    /// would drop to the bottom of its own list.
+    nonisolated static func isKnownSerialService(_ uuid: CBUUID) -> Bool {
+        BluetoothSerial.knownServices.contains {
+            BluetoothSerial.same($0, uuid.uuidString)
+        }
+    }
     #endif
 
     /// The peripheral to reconnect to without being asked.
@@ -794,6 +790,11 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
                   + "node here and the real one on a phone.")
         case .resetting:
             note("The Bluetooth stack is restarting. This resolves itself in a moment.")
+        case .poweredOn:
+            // Not a reason to be unavailable. Named rather than swallowed by
+            // the default, so adding a state to CBManagerState is a compiler
+            // error here instead of a silent nothing.
+            break
         case .unknown:
             break
         @unknown default:
@@ -833,7 +834,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         let advertised = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
         let overflow =
             (advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID]) ?? []
-        let isNode = (advertised + overflow).contains { Self.knownSerialServices.contains($0) }
+        let isNode = (advertised + overflow).contains(where: Self.isKnownSerialService)
         // The local name from the advertisement, then the cached name, then
         // nothing — and an unnamed peripheral is still listed, because an
         // unconfigured module advertises no name at all and is exactly the one
