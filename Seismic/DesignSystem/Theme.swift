@@ -301,10 +301,26 @@ struct InstrumentPanel: ViewModifier {
     var cornerRadius: CGFloat = Theme.Metrics.cornerRadius
 
     func body(content: Content) -> some View {
-        content
-            .padding(padding)
-            .background(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        if #available(iOS 26.0, *) {
+            // Real Liquid Glass, which is a live refraction of the drifting
+            // ambient wash behind it — so each card now genuinely picks up the
+            // colour of the part of the screen it sits on, which the fill below
+            // could only approximate.
+            //
+            // This is the one place the old performance argument had to be
+            // re-examined rather than inherited. It held against
+            // `.ultraThinMaterial`, which is a full-screen Gaussian blur per
+            // card recomputed every frame. `glassEffect` is not that: it is the
+            // same GPU path the system draws its own controls with, and a
+            // scrolling list of them is what it was built for.
+            content
+                .padding(padding)
+                .glassEffect(.regular, in: shape)
+                .shadow(color: .black.opacity(0.35), radius: 14, y: 6)
+        } else {
+            content
+                .padding(padding)
+                .background(
                     // A pre-composited fill rather than `.ultraThinMaterial`.
                     //
                     // A material is a live blur of everything behind it, and a
@@ -314,21 +330,23 @@ struct InstrumentPanel: ViewModifier {
                     // gradient wash, so there is almost nothing for a blur to
                     // reveal that this fill does not already say, and the
                     // difference on screen is not visible.
-                    .fill(Theme.Palette.surface)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .fill(LinearGradient(
+                    shape
+                        .fill(Theme.Palette.surface)
+                        .overlay(
+                            shape.fill(LinearGradient(
                                 colors: [Color.white.opacity(0.07),
                                          Color.white.opacity(0.02),
                                          Color.clear],
                                 startPoint: .top, endPoint: .bottom))
-                    )
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                    .strokeBorder(Theme.Palette.rim, lineWidth: 1)
-            )
-            .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
+                        )
+                )
+                .overlay(shape.strokeBorder(Theme.Palette.rim, lineWidth: 1))
+                .shadow(color: .black.opacity(0.35), radius: 12, y: 4)
+        }
+    }
+
+    private var shape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
     }
 }
 

@@ -30,6 +30,7 @@ struct AssessScreen: View {
                 if let assessment, let building {
                     verdictSection(assessment)
                     periodSection(assessment, building: building)
+                    shapeSection(building)
                     evidenceSection(assessment)
                     reentrySection(assessment)
                     narrativeSection(assessment)
@@ -134,6 +135,8 @@ struct AssessScreen: View {
                          title: "Temperature correction",
                          message: model.explanation)
 
+            robustFitComparison(history)
+
             if history.count > 20 {
                 TrendChart(points: history.map { .init(date: $0.at, value: $0.period) },
                            color: Theme.Palette.accent,
@@ -151,6 +154,181 @@ struct AssessScreen: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .instrumentPanel()
+    }
+
+    /// The same regression fitted two ways, side by side.
+    ///
+    /// Shown because the whole argument for the robust estimator is that it
+    /// *differs* from least squares when the data is contaminated — and a
+    /// difference nobody can see is a claim rather than a demonstration. When
+    /// the two agree the panel says so and takes up three lines; when they
+    /// disagree, that disagreement is the most important thing on the screen,
+    /// because it means one night's measurement is currently steering the
+    /// correction that every verdict depends on.
+    @ViewBuilder
+    private func robustFitComparison(_ history: [ModeObservation]) -> some View {
+        let paired = history.compactMap { observation -> (Double, Double)? in
+            guard let temperature = observation.temperature,
+                  observation.frequency > 0 else { return nil }
+            return (temperature, observation.frequency)
+        }
+
+        if paired.count >= 8,
+           let robust = TheilSen.fit(x: paired.map(\.0), y: paired.map(\.1)),
+           let ols = TheilSen.leastSquares(x: paired.map(\.0), y: paired.map(\.1)) {
+
+            // As a percentage of the robust slope, which is the meaningful
+            // scale — an absolute difference in Hz per °C means nothing without
+            // knowing how big the slope is.
+            let divergence = abs(robust.slope) > 1e-12
+                ? abs(ols.slope - robust.slope) / abs(robust.slope) : 0
+
+            VStack(alignment: .leading, spacing: 6) {
+                HStack {
+                    Text("ROBUST FIT")
+                        .font(Theme.Typography.label)
+                        .tracking(1.1)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                    Spacer()
+                    StatusPill(text: robust.isSlopeSignificant ? "Slope is real"
+                                                               : "Slope is not distinguishable from zero",
+                               tint: robust.isSlopeSignificant ? Theme.Palette.accent
+                                                               : Theme.Palette.textSecondary)
+                }
+
+                ReadoutGrid(readouts: [
+                    Readout(label: "Theil–Sen",
+                            value: String(format: "%.4f", robust.slope),
+                            unit: "Hz/°C", tint: Theme.Palette.accent, size: .small),
+                    Readout(label: "Least squares",
+                            value: String(format: "%.4f", ols.slope),
+                            unit: "Hz/°C", size: .small),
+                ], columns: 2)
+
+                if divergence > 0.15 {
+                    Text(String(format: "The two fits differ by %.0f%%. ", divergence * 100)
+                         + "Theil–Sen takes the median of the slope between every pair of "
+                         + "measurements, so a handful of bad nights cannot move it; least "
+                         + "squares minimises squared error, so one reading at the cold end "
+                         + "of the range can tilt the whole line. A gap this size means the "
+                         + "history contains readings that are pulling — and the correction "
+                         + "used here is the robust one.")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.verdictAmber)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    Text("The robust and least-squares fits agree, which means no small group "
+                         + "of measurements is steering the correction.")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !robust.isSlopeSignificant {
+                    Text("The slope's confidence interval includes zero, so this building's "
+                         + "period may not depend on temperature at all. A correction applied "
+                         + "on a slope that is noise adds error rather than removing it.")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall)
+                .fill(Theme.Palette.surfaceRaised))
+        }
+    }
+
+    // MARK: Mode shapes
+
+    /// Whether the building still moves in the shape it used to, and where it
+    /// stopped doing so.
+    ///
+    /// This is the section that turns a period change into a floor number. A
+    /// period says the building softened; a shape comparison says where.
+    @ViewBuilder
+    private func shapeSection(_ building: BuildingModel) -> some View {
+        let model = ShearBuilding.from(building)
+        let modes = ModalAnalysis.modes(of: model)
+        let damaged = env.latestAssessment.flatMap { assessment -> ShearBuilding? in
+            // The softened building implied by the measured period change —
+            // stiffness scales as the inverse square of period.
+            guard let change = assessment.periodChangePercent, change > 0.5 else { return nil }
+            let ratio = 1 / Foundation.pow(1 + change / 100, 2)
+            var softened = model
+            for i in softened.storeys.indices {
+                softened.storeys[i].stiffness *= ratio
+            }
+            return softened
+        }
+
+        if modes.count >= 2 {
+            let before = modes.prefix(3).map(\.shape)
+            let after = damaged.map { ModalAnalysis.modes(of: $0).prefix(3).map(\.shape) }
+            let comparison = after ?? before
+
+            VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+                SectionLabel("Shape comparison", systemImage: "point.topleft.down.to.point.bottomright.curvepath")
+
+                let mac = ModeShapeComparison.mac(before[0], comparison[0])
+                Readout(label: "Modal assurance criterion",
+                        value: String(format: "%.3f", mac),
+                        tint: mac > 0.9 ? Theme.Palette.accent : Theme.Palette.verdictAmber,
+                        size: .large,
+                        caption: mac > 0.9
+                            ? "The building still moves in the same shape."
+                            : "The shape itself has changed, not only the period.")
+
+                let comac = ModeShapeComparison.comac(before: before, after: comparison)
+                if let changed = ModeShapeComparison.mostChangedStorey(comac) {
+                    InlineNotice(
+                        level: .warning,
+                        title: "Storey \(changed.storey) is where the shape changed",
+                        message: String(format: "Its coordinate MAC is %.2f ", changed.value)
+                            + "against near one everywhere else. That storey has stopped "
+                            + "participating the way it used to, which is what a local loss "
+                            + "of stiffness looks like — and it is where an inspection should "
+                            + "start rather than at the front door.")
+                } else if !comac.isEmpty {
+                    Text("No single storey stands out. The change, if there is one, is spread "
+                         + "through the building rather than concentrated — which is what a "
+                         + "uniformly cracked frame looks like, and it is a different problem "
+                         + "from a soft storey.")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                if !comac.isEmpty {
+                    HStack(alignment: .bottom, spacing: 3) {
+                        ForEach(comac) { storey in
+                            VStack(spacing: 3) {
+                                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                    .fill(storey.value < 0.95 ? Theme.Palette.verdictAmber
+                                                              : Theme.Palette.accent)
+                                    .frame(height: max(CGFloat(storey.value) * 54, 2))
+                                Text("\(storey.storey)")
+                                    .font(.system(size: 8))
+                                    .foregroundStyle(Theme.Palette.textTertiary)
+                            }
+                        }
+                    }
+                    .frame(height: 70, alignment: .bottom)
+                }
+
+                if damaged == nil {
+                    Text("Compared against itself, because no period change has been measured "
+                         + "yet — so this reads as unchanged by construction. After an event "
+                         + "it compares the measured shape against the baseline.")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .instrumentPanel()
+        }
     }
 
     private func evidenceSection(_ assessment: Assessment) -> some View {
@@ -317,6 +495,7 @@ struct AssessScreen: View {
                         }
                     }
                 }
+                pinnedSummary(notes)
             }
 
             Button {
@@ -329,6 +508,50 @@ struct AssessScreen: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .instrumentPanel()
+    }
+
+    /// Where the photographs are, against where the building bends.
+    ///
+    /// A row of thumbnails is a scrapbook. The same photographs, counted by
+    /// storey and set against the storey the model bends hardest at, are the
+    /// beginning of an argument — three cracks clustered at the base of a
+    /// building that bends hardest at the base is corroboration a person can
+    /// see; one crack near the roof of that same building is a question.
+    ///
+    /// Photographs with no storey are counted separately rather than left out.
+    /// "Four of your seven photographs are not pinned anywhere" is exactly the
+    /// nudge that makes the next four useful.
+    @ViewBuilder
+    private func pinnedSummary(_ notes: [DamageNote]) -> some View {
+        if let building {
+            let pinned = notes.compactMap(\.storey)
+            let unpinned = notes.count - pinned.count
+            let worst = ExpectedDamage.worstStorey(of: ShearBuilding.from(building))
+
+            VStack(alignment: .leading, spacing: 5) {
+                if !pinned.isEmpty, let worst {
+                    let atWorst = pinned.filter { $0 == worst }.count
+                    Text(atWorst > 0
+                         ? "\(atWorst) of \(pinned.count) pinned photographs "
+                           + "\(atWorst == 1 ? "is" : "are") on storey \(worst), which is where "
+                           + "this building bends hardest."
+                         : "None of the \(pinned.count) pinned photographs "
+                           + "\(pinned.count == 1 ? "is" : "are") on storey \(worst), where the "
+                           + "model bends hardest — worth a look while you are in there.")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if unpinned > 0 {
+                    Text("\(unpinned) photograph\(unpinned == 1 ? " is" : "s are") not pinned "
+                         + "to a storey, so \(unpinned == 1 ? "it" : "they") cannot be compared "
+                         + "against where the building bends.")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
     }
 
     private func ledgerSection(_ assessment: Assessment) -> some View {

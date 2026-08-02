@@ -54,6 +54,10 @@ struct PreparednessScreen: View {
                     progressSummary
                 }
 
+                if phase == .before {
+                    countdownRehearsal
+                }
+
                 Button {
                     let spoken = items(for: phase)
                         .prefix(6)
@@ -69,6 +73,75 @@ struct PreparednessScreen: View {
             }
             .padding(Theme.Metrics.screenPadding)
             .contentColumn()
+        }
+    }
+
+    // MARK: Learning the countdown
+
+    /// Rehearsing the warning without a screen.
+    ///
+    /// The countdown is delivered as a pattern of taps precisely because the
+    /// people who need it most will not be looking at anything — asleep, in a
+    /// pocket, hands full, or on a wrist under a sleeve. A pattern nobody has
+    /// ever felt before conveys nothing at the moment it arrives, so it has to
+    /// be learnable in advance, in the same posture: phone face down, eyes
+    /// elsewhere.
+    private var countdownRehearsal: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+            SectionLabel("Learn the countdown", systemImage: "iphone.gen3.radiowaves.left.and.right")
+
+            Text("The warning reaches you as taps before it reaches you as words. "
+                 + "Put the phone face down and start this — it is exactly what a real "
+                 + "nine-second warning feels like.")
+                .font(Theme.Typography.callout)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            VStack(alignment: .leading, spacing: 6) {
+                rehearsalLine("Far out", "Soft taps, one a second.")
+                rehearsalLine("Closing in", "The taps sharpen and harden.")
+                rehearsalLine("Last three seconds", "Two hard taps a second.")
+                rehearsalLine("Arrival", "One long rumble — the only sustained "
+                              + "vibration this app ever makes.")
+            }
+
+            Button {
+                env.rehearseCountdown()
+            } label: {
+                Label("Feel a nine-second warning", systemImage: "waveform.path")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(SecondaryButtonStyle())
+
+            if !Haptics.shared.canPlayChoreographedCountdown {
+                Text("This device has no Taptic Engine, so the rehearsal plays as plain "
+                     + "vibration rather than the pattern above.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Text("If you wear an Apple Watch, the same countdown appears in its Smart "
+                 + "Stack while an event is running — the number and the instruction, "
+                 + "nothing else.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .instrumentPanel()
+    }
+
+    private func rehearsalLine(_ phase: String, _ detail: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Text(phase)
+                .font(Theme.Typography.numericSmall)
+                .foregroundStyle(Theme.Palette.accent)
+                .frame(width: 118, alignment: .leading)
+            Text(detail)
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

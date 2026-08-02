@@ -4,6 +4,7 @@ import UIKit
 import SeismicCore
 import SeismicData
 import SeismicServices
+import SeismicStructures
 
 /// Where photographs live.
 ///
@@ -203,6 +204,73 @@ struct DamageCaptureSheet: View {
             }
             .pickerStyle(.menu)
             .tint(Theme.Palette.accent)
+
+            expectation
+        }
+    }
+
+    /// What the model expects at the storey this photograph was pinned to.
+    ///
+    /// This is the whole reason for asking which storey. A photograph filed
+    /// under "storey three" is an archive entry; the same photograph beside
+    /// "storey three is where this building bends hardest" is evidence, and
+    /// beside "the model bends hardest at storey seven" it is a question worth
+    /// asking. The prediction comes from the building's own first mode, so it
+    /// exists before any earthquake has happened — which is when somebody is
+    /// actually walking round looking at cracks.
+    @ViewBuilder
+    private var expectation: some View {
+        if let storey,
+           let agreement = ExpectedDamage.agreement(
+                forStorey: storey, in: ShearBuilding.from(building)) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: icon(for: agreement.verdict))
+                    .font(.system(size: 15))
+                    .foregroundStyle(tint(for: agreement.verdict))
+                    .frame(width: 20)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(headline(for: agreement.verdict))
+                        .font(Theme.Typography.callout.weight(.medium))
+                        .foregroundStyle(Theme.Palette.textPrimary)
+                    Text(agreement.explanation)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall)
+                .fill(Theme.Palette.surfaceRaised))
+        }
+    }
+
+    private func headline(for verdict: ExpectedDamage.Agreement.Verdict) -> String {
+        switch verdict {
+        case .confirms: "Where the model bends hardest"
+        case .plausible: "A storey that takes moderate bending"
+        case .unexpected: "Not where the model bends"
+        }
+    }
+
+    private func icon(for verdict: ExpectedDamage.Agreement.Verdict) -> String {
+        switch verdict {
+        case .confirms: "scope"
+        case .plausible: "circle.lefthalf.filled"
+        case .unexpected: "questionmark.circle"
+        }
+    }
+
+    /// Deliberately not the verdict palette. Green, amber and red are reserved
+    /// for structural verdicts, and this is a comment on a photograph — a
+    /// coloured chip here that looked like a placard would be exactly the kind
+    /// of erosion that rule exists to prevent.
+    private func tint(for verdict: ExpectedDamage.Agreement.Verdict) -> Color {
+        switch verdict {
+        case .confirms: Theme.Palette.accent
+        case .plausible: Theme.Palette.accentSecondary
+        case .unexpected: Theme.Palette.textSecondary
         }
     }
 

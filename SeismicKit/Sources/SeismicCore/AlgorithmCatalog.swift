@@ -1,6 +1,6 @@
 import Foundation
 
-/// The fifty algorithms, as data.
+/// The algorithms, as data.
 ///
 /// This exists so none of them is invisible work. The diagnostics screen renders
 /// this catalogue directly: every entry names where its output is visible in the
@@ -110,7 +110,7 @@ public enum AlgorithmCatalog {
               surfacedAt: "Analysis → Spectrum → Smoothing control"),
         .init(18, "Peak picking with prominence and separation", .spectral,
               "Finds the modal peaks and ignores the ripples between them.",
-              surfacedAt: "Analysis → Identified modes"),
+              surfacedAt: "Analysis → Operational modal analysis"),
         .init(19, "Parabolic sub-bin interpolation", .spectral,
               "Recovers frequency precision finer than the FFT bin spacing, which matters when a 2% shift is the signal.",
               surfacedAt: "Analysis → Period readout"),
@@ -255,9 +255,105 @@ public enum AlgorithmCatalog {
         .init(62, "Reputation-weighted consensus", .infrastructure,
               "Lets a professional assessment outweigh a crowd, without silencing the crowd.",
               surfacedAt: "Map → building consensus"),
+
+        // Operational modal analysis — measuring the building from its own
+        // ambient wobble, with several modes at once instead of one.
+        .init(63, "Frequency domain decomposition", .modal,
+              "Uses all three channels at once, so two modes a few per cent apart are seen as two rather than as one drifting average.",
+              surfacedAt: "Analysis → Operational modal analysis"),
+        .init(64, "Prony linear-prediction pole extraction", .modal,
+              "Fits every mode and every damping ratio at once, so a change in the third mode is not hidden by the first.",
+              surfacedAt: "Analysis → Operational modal analysis"),
+        .init(65, "Stabilisation diagram", .modal,
+              "Runs the identification at many model orders and keeps only the poles that survive all of them — how a real mode is told from a numerical one.",
+              surfacedAt: "Analysis → Operational modal analysis"),
+        .init(66, "Modal assurance criterion", .modal,
+              "One number for whether the building is still moving in the same shape it used to.",
+              surfacedAt: "Assess → Shape comparison"),
+        .init(67, "Coordinate MAC damage localisation", .modal,
+              "Turns 'it softened' into 'it softened at storey four', which is where an inspection should start.",
+              surfacedAt: "Assess → Shape comparison"),
+
+        // Spectral estimation that does not have to trade resolution away.
+        .init(68, "Sine multitaper spectral estimate", .spectral,
+              "Several orthogonal tapers over the whole record, so variance falls without giving up the resolution a 2% period shift needs.",
+              surfacedAt: "Analysis → Spectrum → Estimator"),
+        .init(69, "Thomson harmonic F-test", .spectral,
+              "Separates a deterministic line — mains hum, a lift motor — from a real structural resonance that looks identical on a spectrum.",
+              surfacedAt: "Analysis → Spectrum → line warning"),
+        .init(70, "Morlet wavelet ridge extraction", .spectral,
+              "Follows the building's period *during* the shaking, so the moment it softened is visible rather than inferred from before and after.",
+              surfacedAt: "Analysis → Period during the shaking"),
+        .init(71, "Empirical mode decomposition", .spectral,
+              "Separates sway from traffic rumble and electrical hash without being told in advance what frequency any of them is.",
+              surfacedAt: "Analysis → Intrinsic modes"),
+        .init(72, "Savitzky-Golay polynomial smoothing", .conditioning,
+              "Smooths a spectrum without flattening its peaks, which matters because peak width is what damping is read from.",
+              surfacedAt: "Analysis → Spectrum smoothing"),
+
+        // Making a phone good enough to be a sensor.
+        .init(73, "LMS adaptive noise cancellation", .conditioning,
+              "Learns and removes whatever plant noise this particular building makes, without anyone configuring it.",
+              surfacedAt: "Monitor → Overnight measurement"),
+        .init(74, "Kalman displacement with zero-velocity updates", .conditioning,
+              "Recovers where the building came to rest, instead of high-passing away the very low frequencies that answer lives at.",
+              surfacedAt: "Analysis → Displacement"),
+        .init(75, "Overlapping Allan variance", .infrastructure,
+              "Measures this phone's own noise floor, so the app can say plainly whether it can resolve this building at all.",
+              surfacedAt: "Node → Sensor quality"),
+        .init(76, "Sub-sample cross-correlation alignment", .detection,
+              "Recovers clock skew between phones from the waveforms themselves — ten milliseconds of skew is sixty metres of epicentre.",
+              surfacedAt: "Network → Clock check"),
+
+        // Detection that finds what a threshold cannot.
+        .init(77, "Matched-filter template detection", .detection,
+              "Finds aftershocks by shape rather than size, including the ones too small to trip an energy detector.",
+              surfacedAt: "Analysis → Aftershocks in this record"),
+        .init(78, "Kurtosis onset picker", .detection,
+              "Catches an emergent onset the AIC picker smears out — and the two disagreeing means the source is distant, which means more warning.",
+              surfacedAt: "Analysis → Detection → kurtosis pick"),
+        .init(79, "Covariance polarisation back-azimuth", .location,
+              "Gives the direction to the epicentre from a single three-axis sensor, with no network at all.",
+              surfacedAt: "Network → Bearing from this sensor alone"),
+
+        // A crowd of phones is a network with wrong members in it.
+        .init(80, "RANSAC arrival-time consensus", .location,
+              "Excludes the phone in a moving car instead of accommodating it — one bad station can drag a least-squares epicentre kilometres.",
+              surfacedAt: "Network → Consensus"),
+        .init(81, "Inverse-distance intensity field", .location,
+              "Builds a shaking map from scattered reports, and fades out where nobody was standing rather than guessing confidently.",
+              surfacedAt: "Map → Shaking layer"),
+        .init(82, "DBSCAN density clustering", .infrastructure,
+              "Clusters map tags by density rather than by grid cell, so a terrace is one cluster and a lone building stays a lone building.",
+              surfacedAt: "Map → Clusters"),
+
+        // How much the building had left.
+        .init(83, "Nonlinear static pushover", .structural,
+              "Pushes the building until a mechanism forms, producing its capacity as a property of the structure rather than of one earthquake.",
+              surfacedAt: "Simulator → How much it could take"),
+        .init(84, "Capacity spectrum performance point", .structural,
+              "Intersects capacity with demand to find the displacement this earthquake actually reaches — the code method, without a time history.",
+              surfacedAt: "Simulator → How much it could take"),
+        .init(85, "P-delta second-order stability", .structural,
+              "The building's own weight amplifying its lean, which is worst exactly where this app's users are: heavy, flexible and already damaged.",
+              surfacedAt: "Simulator → How much it could take"),
+        .init(86, "Soil-structure interaction cone model", .structural,
+              "Stops a building on soft clay reading as damaged on the day it was built, by predicting the period the foundation actually gives it.",
+              surfacedAt: "Simulator → How much it could take"),
+        .init(87, "Incremental dynamic analysis", .structural,
+              "Scales the record up until the building fails, answering 'how much worse could it have been' rather than only 'what happened'.",
+              surfacedAt: "Simulator → Find where it breaks"),
+        .init(88, "Theil-Sen robust regression", .assessment,
+              "The temperature correction, fitted so that one bad night in a year cannot tilt it — least squares can be broken by a single point.",
+              surfacedAt: "Assess → Temperature correction"),
     ]
 
-    public static let countedAlgorithms = 50
+    /// The algorithms that do the work, as opposed to the infrastructure that
+    /// carries it. Grown from fifty to seventy-five: twenty-five were added,
+    /// two of which — Allan variance and DBSCAN — are supporting rather than
+    /// analytical and are not counted, matching how the original fifty were
+    /// drawn.
+    public static let countedAlgorithms = 74
 
     public static func entry(_ n: Int) -> AlgorithmEntry? { all.first { $0.number == n } }
 

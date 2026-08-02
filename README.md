@@ -25,11 +25,19 @@ Requires Xcode 16 or later and iOS 17+.
 cd SeismicKit && swift test
 ```
 
-555 tests across seven modules. Every one of the fifty algorithms is tested
-against a known input with an expected output, and every network client is
-tested against a stubbed transport — including the paths that fail, which are
+949 tests across seven modules. Every one of the seventy-four algorithms is
+tested against a known input with an expected output, and every network client
+is tested against a stubbed transport — including the paths that fail, which are
 the ones that matter and the ones a live-network test would never reach
 reliably.
+
+Several of those tests exist to record a *limitation* rather than a capability:
+that COMAC cannot see a uniform amplitude change at one storey, that a matched
+filter's detection margin for a buried event is about five times the noise
+scatter and not more, that a mid-range outlier barely moves a least-squares fit
+while one at the end of the range wrecks it. Each was written after the obvious
+version of the test failed and the honest explanation turned out to be more
+interesting than the assertion.
 
 ## What is here
 
@@ -39,10 +47,11 @@ Seismic.xcodeproj        The app target (file-system synchronised — new files
 Seismic/                 SwiftUI app: design system, charts, 3D simulator, screens
 SeismicKit/              All logic, as a multi-module Swift package
   SeismicCore            Units, domain types, secrets, shared maths
-  SeismicSignal          Algorithms 1–34: conditioning, detection, spectra, modal
-  SeismicGeo             Algorithms 35–38 plus spatial indexing and geometry
-  SeismicStructures      Algorithms 39–50: the solver and the assessment
-  SeismicDevice          BLE protocol, chunked transfer, the simulated node
+  SeismicSignal          Conditioning, detection, spectra, modal identification
+  SeismicGeo             Location, network inversion, spatial indexing, geometry
+  SeismicStructures      The solver, the assessment, capacity and performance
+  SeismicDevice          The Arduino wire protocol, chunked transfer, the
+                         simulated node
   SeismicData            Persistence, seed library, tamper-evident ledger, sync
   SeismicServices        HTTP with backoff, the AI analyst, retrieval, cloud
 SeismicWidgets/          Home-screen widget and the Live Activity
@@ -143,7 +152,37 @@ section works, not only the five with tabs:
 SEISMIC_INITIAL_TAB=simulator
 SEISMIC_INITIAL_TAB=prepare
 SEISMIC_INITIAL_TAB=network
+SEISMIC_INITIAL_TAB=device
+SEISMIC_INITIAL_TAB=channels
 ```
+
+## The hardware
+
+`arduino.ino` is the firmware for an Arduino MEGA node: six sensors, a two-of-
+three fusion vote, two verified actuators, a chunked recording and a structural
+assessment. It talks newline-delimited JSON over BLE (service FFE0,
+characteristic FFE1) and takes plain-text commands back.
+
+**Hardware → Test earthquake** runs the node's entire event sequence, and the
+app follows it live — declaration with the vote breakdown, countdown, power cut
+with its photoresistor evidence, water main, recording transfer, period
+re-measurement, verdict. The presenter never touches the board.
+
+Everything works with no board present. The simulated node emits the same lines
+through the same parser, so a screen that works against it works against the
+hardware; a test asserts it can produce all sixteen message types and that every
+line it emits parses.
+
+Two things worth knowing about the protocol as built:
+
+* **`REC:n` re-sends a single chunk.** Added to the firmware for this — before
+  it existed, one dropped BLE notification meant re-requesting all twenty-five
+  chunks, three seconds of airtime to recover twenty samples with a fair chance
+  of losing a different one on the way. The app now asks for exactly what is
+  missing, and keeps what already arrived either way.
+* **The gas valve is modelled and unavailable.** A servo drawing 250 mA
+  alongside a stepper drawing 260 browns out a board with a 500 mA budget. One
+  actuator had to be shed; the console says so rather than hiding it.
 
 ## Notes on a few decisions
 

@@ -92,10 +92,12 @@ final class TutorialDirector: ObservableObject {
                  + "Your own position is offset before anything is shared.",
              anchor: nil),
         Step(id: "more", section: .home,
-             title: "Everything else is in here",
-             body: "Assess, Analysis, Node, Preparedness, Household and the rest. Nine screens "
-                 + "would not fit in a tab bar anybody could use in a hurry.",
-             anchor: .moreMenu, prefersCardBelow: true),
+             title: "Everything else is on the orb",
+             body: "Press it and the other nine screens fan out around your thumb — Assess, "
+                 + "Analysis, Node, Preparedness, Household and the rest. Keep your thumb down "
+                 + "and sweep to one, or just tap it. Nine icons would not fit in a bar anybody "
+                 + "could use in a hurry.",
+             anchor: .navigationDock, prefersCardBelow: false),
     ]
 
     var current: Step? { steps.indices.contains(index) ? steps[index] : nil }
@@ -158,7 +160,7 @@ final class TutorialDirector: ObservableObject {
 enum TutorialAnchor: String, Hashable, CaseIterable {
     case homeVerdict
     case monitorFreeze
-    case moreMenu
+    case navigationDock
 }
 
 // MARK: - Reporting a frame

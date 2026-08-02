@@ -53,6 +53,87 @@ struct MonitorScreen: View {
     /// absurd for a number that changes only when the data does.
     @State private var displayScale: Double?
 
+    // MARK: The measurement nobody has to take
+
+    /// What the overnight measurement has been doing.
+    ///
+    /// Shown rather than left to run silently. Something that writes to the
+    /// record of your own building while you are asleep has to be able to say
+    /// what it wrote, when, and — the part that matters most — when it decided
+    /// not to. A skipped night is information: it usually means the building
+    /// was not quiet, and a building that is never quiet is one whose history
+    /// will always be thinner than the sales pitch implies.
+    private var nightlyBaseline: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+            HStack {
+                SectionLabel("Overnight measurement", systemImage: "moon.zzz")
+                Spacer()
+                StatusPill(text: env.baseline.isEnabled ? "On" : "Off",
+                           tint: env.baseline.isEnabled ? Theme.Palette.accent
+                                                        : Theme.Palette.textSecondary)
+            }
+
+            Text(env.baseline.historySummary(observationCount: env.observations.count))
+                .font(Theme.Typography.callout)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let attempt = env.baseline.lastAttempt {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: attempt.outcome.isRecorded
+                          ? "checkmark.circle" : "minus.circle")
+                        .font(.system(size: 14))
+                        .foregroundStyle(attempt.outcome.isRecorded
+                                         ? Theme.Palette.accent : Theme.Palette.textTertiary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(attempt.outcome.label)
+                            .font(Theme.Typography.numericSmall)
+                            .foregroundStyle(Theme.Palette.textPrimary)
+                        if case .recorded(_, _, let temperature) = attempt.outcome,
+                           temperature == nil {
+                            // The one caveat worth repeating every time: without
+                            // a structure temperature this reading cannot be
+                            // temperature-corrected later, and a row of them
+                            // makes the regression look denser than it is.
+                            Text("No structure temperature — this phone has no thermometer "
+                                 + "against the building, so this reading cannot be "
+                                 + "temperature-corrected.")
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Text(attempt.at.formatted(date: .abbreviated, time: .shortened))
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                    }
+                }
+            }
+
+            HStack(spacing: Theme.Metrics.spacing) {
+                Toggle("Measure automatically", isOn: Binding(
+                    get: { env.baseline.isEnabled },
+                    set: { env.baseline.isEnabled = $0 }))
+                    .font(Theme.Typography.callout)
+                    .tint(Theme.Palette.accent)
+            }
+
+            // A feature that only ever happens at three in the morning is a
+            // feature nobody can be shown, and one nobody can be shown is one
+            // nobody believes. This runs the same code path, now, and says so.
+            Button {
+                env.baseline.measureNow(environment: env)
+                Haptics.shared.play(.selection)
+            } label: {
+                Label("Measure now, ignoring the hour", systemImage: "bolt.badge.clock")
+                    .font(Theme.Typography.callout)
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(SecondaryButtonStyle())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .instrumentPanel()
+    }
+
     private var visible: TriaxialRecord {
         guard record.count > 0 else { return record }
         let from = max(record.duration - windowSeconds, 0)
@@ -156,6 +237,7 @@ struct MonitorScreen: View {
                     traces
                     controls
                     liveValues
+                    nightlyBaseline
                     processingChain
                 }
             }

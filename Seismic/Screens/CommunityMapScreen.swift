@@ -60,12 +60,14 @@ struct CommunityMapScreen: View {
     private let historyYears: Double = 10
 
     enum MapLayer: String, CaseIterable, Identifiable {
-        case community, earthquakes
+        case community, triage, intensity, earthquakes
         var id: String { rawValue }
 
         var label: String {
             switch self {
             case .community: "Buildings"
+            case .triage: "Visit order"
+            case .intensity: "Shaking"
             case .earthquakes: "Earthquakes"
             }
         }
@@ -73,9 +75,14 @@ struct CommunityMapScreen: View {
         var systemImage: String {
             switch self {
             case .community: "building.2"
+            case .triage: "list.number"
+            case .intensity: "square.grid.3x3.fill"
             case .earthquakes: "waveform.path.ecg"
             }
         }
+
+        /// These all draw community tags; only the presentation differs.
+        var showsTags: Bool { self != .earthquakes }
     }
 
     /// A point somebody asked about, and the answer.
@@ -121,7 +128,44 @@ struct CommunityMapScreen: View {
             // put a pin.
             MapReader { proxy in
                 Map(position: $position) {
-                    if layer == .community {
+                    if layer == .triage {
+                        // Numbered rather than clustered. The whole value of
+                        // this layer is knowing that the pin in front of you is
+                        // the fourth stop and not the fortieth, and a cluster
+                        // badge saying "6 buildings" destroys exactly that.
+                        ForEach(triageQueue) { stop in
+                            Annotation(stop.tag.buildingLabel,
+                                       coordinate: CLLocationCoordinate2D(
+                                        latitude: stop.tag.latitude,
+                                        longitude: stop.tag.longitude)) {
+                                TriageMarker(stop: stop) { selected = stop.tag }
+                            }
+                        }
+                    } else if layer == .intensity {
+                        // A shaking map interpolated from the reports, drawn as
+                        // translucent squares. Squares rather than a smooth
+                        // surface on purpose: the resolution of the estimate is
+                        // visible in the size of the cell, and a smooth gradient
+                        // would imply a precision the scattered reports do not
+                        // have.
+                        ForEach(intensityCells) { cell in
+                            MapPolygon(coordinates: cell.corners)
+                                .foregroundStyle(cell.colour)
+                        }
+                        // The reports themselves stay visible on top, so it is
+                        // always clear which colour was measured and which was
+                        // interpolated.
+                        ForEach(visibleTags) { tag in
+                            Annotation("", coordinate: CLLocationCoordinate2D(
+                                latitude: tag.latitude, longitude: tag.longitude)) {
+                                Circle()
+                                    .fill(tag.verdict.color)
+                                    .frame(width: 8, height: 8)
+                                    .overlay(Circle().strokeBorder(.white.opacity(0.7),
+                                                                   lineWidth: 1))
+                            }
+                        }
+                    } else if layer == .community {
                         ForEach(clusters) { cluster in
                             Annotation(cluster.isSingle
                                        ? (cluster.items.first?.buildingLabel ?? "")
@@ -168,9 +212,19 @@ struct CommunityMapScreen: View {
             VStack(spacing: Theme.Metrics.spacing) {
                 searchBar
                 layerPicker
-                if layer == .community { summaryBar } else { seismicityBar }
+                switch layer {
+                case .community: summaryBar
+                case .triage: triageBar
+                case .intensity: intensityBar
+                case .earthquakes: seismicityBar
+                }
                 Spacer()
-                if layer == .community { timeSlider } else { historyHint }
+                switch layer {
+                case .community: timeSlider
+                case .triage: triageList
+                case .intensity: intensityLegend
+                case .earthquakes: historyHint
+                }
             }
             .padding(Theme.Metrics.screenPadding)
             .contentColumn()
@@ -183,7 +237,7 @@ struct CommunityMapScreen: View {
                           : "line.3.horizontal.decrease.circle.fill")
                 }
                 .accessibilityLabel("Filters")
-                .disabled(layer != .community)
+                .disabled(!layer.showsTags)
             }
             // Reading everybody's reports without ever being able to add your
             // own makes this a broadcast rather than a network — and the map's
@@ -233,7 +287,7 @@ struct CommunityMapScreen: View {
             if layer == .earthquakes { await fetchRegionHistory() }
         }
         .overlay(alignment: .bottom) {
-            if let remoteNote, layer == .community {
+            if let remoteNote, layer.showsTags {
                 Text(remoteNote)
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Palette.textSecondary)
@@ -245,6 +299,228 @@ struct CommunityMapScreen: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    // MARK: Triage
+
+    /// The order to visit the tags on screen in.
+    ///
+    /// Computed from what is *visible*, deliberately, so it answers the
+    /// question an inspector is actually asking — "where do I go next, from
+    /// here" — rather than ranking a whole city they are not in. Panning the
+    /// map re-plans the round.
+    private var triageQueue: [InspectionTriage.Stop] {
+        InspectionTriage.queue(
+            tags: visibleTags,
+            // Storey counts for the buildings this device knows about. Tags
+            // for buildings it has never seen are scored as unknown rather than
+            // as empty — see `InspectionTriage.exposure`.
+            storeysByBuildingID: Dictionary(
+                env.buildings.map { ($0.id, $0.storeyCount) },
+                uniquingKeysWith: { first, _ in first }),
+            start: (latitude: centre.latitude, longitude: centre.longitude))
+    }
+
+    private var triageBar: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(InspectionTriage.summary(of: triageQueue))
+                .font(Theme.Typography.numericSmall)
+                .foregroundStyle(Theme.Palette.textPrimary)
+            Text("Ordered by what a wrong answer would cost, then walked nearest-first "
+                 + "inside each band. Tap a stop to see why it is there.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(.ultraThinMaterial,
+                    in: RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall))
+    }
+
+    /// The first few stops, in order, as a scrolling strip.
+    ///
+    /// Capped rather than showing everything: a queue of two hundred is a queue
+    /// nobody reads, and the count in the bar above already says how many there
+    /// really are, so the cap cannot be mistaken for the total.
+    private var triageList: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: Theme.Metrics.spacing) {
+                ForEach(triageQueue.prefix(12)) { stop in
+                    Button { selected = stop.tag } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 6) {
+                                Text("\(stop.position)")
+                                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                                    .foregroundStyle(.white)
+                                    .frame(width: 22, height: 22)
+                                    .background(stop.tag.verdict.color, in: Circle())
+                                Text(stop.tag.buildingLabel)
+                                    .font(Theme.Typography.callout.weight(.medium))
+                                    .foregroundStyle(Theme.Palette.textPrimary)
+                                    .lineLimit(1)
+                            }
+                            Text(stop.reasons.first ?? "")
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(Theme.Palette.textSecondary)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                            if stop.position > 1 {
+                                Text(stop.metresFromPrevious < 1_000
+                                     ? "\(Int(stop.metresFromPrevious.rounded())) m from the last"
+                                     : String(format: "%.1f km from the last",
+                                              stop.metresFromPrevious / 1_000))
+                                    .font(Theme.Typography.numericSmall)
+                                    .foregroundStyle(Theme.Palette.textTertiary)
+                            }
+                        }
+                        .frame(width: 210, alignment: .leading)
+                        .padding(11)
+                        .background(.ultraThinMaterial,
+                                    in: RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 2)
+        }
+        .frame(height: 108)
+    }
+
+    // MARK: Shaking
+
+    /// One square of the interpolated shaking map.
+    struct IntensityCell: Identifiable {
+        let id: Int
+        let corners: [CLLocationCoordinate2D]
+        let colour: Color
+    }
+
+    /// The shaking field, interpolated from whatever reports are on screen.
+    ///
+    /// Every cell's opacity carries its confidence, which is the whole point:
+    /// a square five kilometres from the nearest report is a guess, and drawing
+    /// it as solidly as a measured one would be a lie told in colour. Cells
+    /// with no support at all are dropped rather than drawn faintly, because
+    /// "no data" and "low shaking" must not look alike.
+    private var intensityCells: [IntensityCell] {
+        let tags = visibleTags
+        guard tags.count >= 2 else { return [] }
+
+        // Severity as a number the interpolator can work with. The verdict is
+        // the only intensity proxy the community actually reports.
+        let reports = tags.map { tag in
+            IntensityField.Report(
+                latitude: tag.latitude, longitude: tag.longitude,
+                value: severity(of: tag.verdict),
+                // A professional's report outweighs a passer-by's, which is the
+                // same reputation weighting the consensus score uses.
+                weight: tag.tier.trustWeight)
+        }
+
+        let latitudes = tags.map(\.latitude), longitudes = tags.map(\.longitude)
+        // A little beyond the reports, so the fade-out at the edge is visible
+        // rather than being cropped away.
+        let padLat = max((latitudes.max()! - latitudes.min()!) * 0.25, 0.004)
+        let padLon = max((longitudes.max()! - longitudes.min()!) * 0.25, 0.004)
+        let minLat = latitudes.min()! - padLat, maxLat = latitudes.max()! + padLat
+        let minLon = longitudes.min()! - padLon, maxLon = longitudes.max()! + padLon
+
+        let resolution = 18
+        let grid = IntensityField.grid(
+            reports: reports,
+            minimumLatitude: minLat, maximumLatitude: maxLat,
+            minimumLongitude: minLon, maximumLongitude: maxLon,
+            resolution: resolution, searchRadiusKm: 3)
+
+        let cellLat = (maxLat - minLat) / Double(resolution - 1)
+        let cellLon = (maxLon - minLon) / Double(resolution - 1)
+
+        var cells: [IntensityCell] = []
+        for (row, line) in grid.enumerated() {
+            for (column, estimate) in line.enumerated() {
+                guard let estimate, estimate.supportingReports > 0,
+                      estimate.confidence > 0.12 else { continue }
+                let latitude = minLat + cellLat * Double(row)
+                let longitude = minLon + cellLon * Double(column)
+                cells.append(IntensityCell(
+                    id: row * resolution + column,
+                    corners: [
+                        .init(latitude: latitude, longitude: longitude),
+                        .init(latitude: latitude + cellLat, longitude: longitude),
+                        .init(latitude: latitude + cellLat, longitude: longitude + cellLon),
+                        .init(latitude: latitude, longitude: longitude + cellLon),
+                    ],
+                    colour: intensityColour(estimate.value)
+                        .opacity(0.15 + estimate.confidence * 0.45)))
+            }
+        }
+        return cells
+    }
+
+    /// A 0–1 severity from a verdict.
+    private func severity(of verdict: SafetyVerdict) -> Double {
+        switch verdict {
+        case .green: 0.15
+        case .needsInspection: 0.5
+        case .amber: 0.65
+        case .red: 1.0
+        }
+    }
+
+    /// Deliberately not the verdict palette.
+    ///
+    /// Green, amber and red mean *a structural verdict on a specific building*
+    /// and nothing else in this app. An interpolated square is a guess about
+    /// how hard the ground shook, which is a different claim about a different
+    /// thing — so it gets the accent ramp, and the verdict dots stay drawn on
+    /// top in their own colours where they can be told apart from it.
+    private func intensityColour(_ value: Double) -> Color {
+        Color(hue: 0.62 - 0.62 * min(max(value, 0), 1) * 0.28,
+              saturation: 0.55 + 0.35 * min(max(value, 0), 1),
+              brightness: 0.55 + 0.35 * min(max(value, 0), 1))
+    }
+
+    private var intensityBar: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(intensityCells.isEmpty
+                 ? "Not enough reports in view to interpolate a shaking map."
+                 : "\(intensityCells.count) cells interpolated from \(visibleTags.count) reports")
+                .font(Theme.Typography.numericSmall)
+                .foregroundStyle(Theme.Palette.textPrimary)
+            Text("Inverse-distance weighted, with the exponent set to match how ground motion "
+                 + "actually attenuates. Each square fades with its distance from the nearest "
+                 + "real report, so a guess never looks like a measurement.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(10)
+        .background(.ultraThinMaterial,
+                    in: RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall))
+    }
+
+    private var intensityLegend: some View {
+        HStack(spacing: Theme.Metrics.spacing) {
+            ForEach([("Light", 0.15), ("Moderate", 0.5), ("Severe", 1.0)], id: \.0) { pair in
+                HStack(spacing: 5) {
+                    RoundedRectangle(cornerRadius: 3, style: .continuous)
+                        .fill(intensityColour(pair.1).opacity(0.6))
+                        .frame(width: 16, height: 16)
+                    Text(pair.0)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                }
+            }
+            Spacer()
+            Text("Faded = far from any report")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Palette.textTertiary)
+        }
+        .padding(10)
+        .background(.ultraThinMaterial,
+                    in: RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall))
     }
 
     // MARK: Layers, search and inspection
@@ -537,19 +813,51 @@ struct CommunityMapScreen: View {
     /// Without it a street after a real earthquake is an unreadable pile of
     /// overlapping pins — and the pile hides exactly the thing somebody is
     /// looking for, which is whether any of them are red.
+    /// Tags grouped for drawing.
+    ///
+    /// Density-based rather than by grid cell. A grid has a flaw that is
+    /// invisible in a screenshot and obvious in use: a cell boundary running
+    /// down the middle of a street splits one terrace into two clusters sitting
+    /// side by side, and panning the map by a few metres merges them again — so
+    /// the same buildings regroup as you scroll. DBSCAN groups by whether
+    /// points are near *each other*, so a terrace is one cluster of whatever
+    /// shape the terrace is, and it does not move when the map does.
+    ///
+    /// It also does something a grid cannot: a building on its own is reported
+    /// as noise rather than as a cluster of one, so it is drawn as itself.
     private var clusters: [MapCluster<CommunityTag>] {
-        let cellSize = MarkerClustering.cellSize(forVisibleSpanMetres: visibleSpanMetres)
-        return MarkerClustering.cluster(
-            visibleTags.map { tag in
-                // Published position, not true position: a tag inherits the
-                // building's privacy setting, and an exact pin on a damaged
-                // house is an advertisement to a burglar.
-                let point = LocationPrivacy.approximate(
-                    GeoPoint(latitude: tag.latitude, longitude: tag.longitude),
-                    precision: tag.tier == .professional ? 9 : 7)
-                return (item: tag, point: point)
-            },
-            cellSizeMetres: cellSize)
+        // Published position, not true position: a tag inherits the building's
+        // privacy setting, and an exact pin on a damaged house is an
+        // advertisement to a burglar.
+        let placed = visibleTags.map { tag -> (tag: CommunityTag, point: GeoPoint) in
+            (tag, LocationPrivacy.approximate(
+                GeoPoint(latitude: tag.latitude, longitude: tag.longitude),
+                precision: tag.tier == .professional ? 9 : 7))
+        }
+
+        // The neighbourhood radius follows the zoom, so what reads as "close
+        // together" on screen is what gets grouped.
+        let radiusKm = max(MarkerClustering.cellSize(forVisibleSpanMetres: visibleSpanMetres)
+                           / 1_000, 0.02)
+
+        let result = DensityClustering.cluster(
+            placed, radiusKm: radiusKm, minimumPoints: 2,
+            latitude: { $0.point.latitude }, longitude: { $0.point.longitude })
+
+        // The identity has to come from the members rather than from a counter,
+        // or SwiftUI re-creates every annotation whenever the clustering
+        // changes and the whole map flickers.
+        var out = result.clusters.map { cluster in
+            MapCluster(id: cluster.items.map { $0.tag.id.uuidString }.sorted().joined(),
+                       centre: GeoPoint(latitude: cluster.centreLatitude,
+                                        longitude: cluster.centreLongitude),
+                       items: cluster.items.map(\.tag))
+        }
+        // Isolated buildings, each as itself.
+        out.append(contentsOf: result.noise.map {
+            MapCluster(id: $0.tag.id.uuidString, centre: $0.point, items: [$0.tag])
+        })
+        return out
     }
 
     private func centreOnBuilding() {
@@ -664,6 +972,35 @@ struct TagMarker: View {
 /// glance separates the thousands of events that shook nothing from the handful
 /// that damaged buildings — which is the only distinction that matters when you
 /// are asking what a place is like.
+/// A numbered pin in the visit order.
+///
+/// The number is the whole point, so it is the largest thing on the pin and the
+/// verdict colour is the ring around it rather than the fill. An inspector
+/// standing in a street needs to know which of the pins in front of them is
+/// next, and that is a question about ordinals, not about colour.
+struct TriageMarker: View {
+    let stop: InspectionTriage.Stop
+    var onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            Text("\(stop.position)")
+                .font(.system(size: stop.position < 10 ? 15 : 13,
+                              weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .foregroundStyle(.white)
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(Color.black.opacity(0.55)))
+                .overlay(Circle().strokeBorder(stop.tag.verdict.color,
+                                               lineWidth: stop.tag.verdict.borderWidth + 1))
+                .shadow(color: .black.opacity(0.4), radius: 4, y: 2)
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Stop \(stop.position), \(stop.tag.buildingLabel), "
+                            + stop.tag.verdict.placard)
+    }
+}
+
 struct EpicentreMarker: View {
     let event: RegionalHistory.Event
     let action: () -> Void

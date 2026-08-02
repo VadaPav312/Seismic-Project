@@ -34,6 +34,21 @@ final class AppEnvironment: ObservableObject {
     /// The Lock Screen and the home-screen widget.
     let live = LiveActivityController()
 
+    /// Measures the building on its own, overnight, so the temperature
+    /// regression fills in without anybody pressing anything.
+    let baseline = BaselineScheduler()
+
+    /// The neighbouring buildings, per building, for the simulator's street.
+    let block = BlockContext()
+
+    /// The Arduino node: the radio, the protocol, and everything it has said.
+    ///
+    /// Owned here rather than by a screen because two screens read it — the
+    /// hardware controls and the sensor channels — and a link that reconnected
+    /// every time one of them appeared would drop the demonstration at exactly
+    /// the wrong moment.
+    let link = SeismicNodeLink()
+
     /// How many credentials were found in `.env` at first launch. Surfaced once,
     /// in Settings, and never as a prompt — the app owes the user a working
     /// experience whether or not they ever add a key.
@@ -119,6 +134,53 @@ final class AppEnvironment: ObservableObject {
 
     private var timer: AnyCancellable?
     private var simulatedNode: SimulatedNode?
+    private var phoneSensor: PhoneSensorTransport?
+
+    /// Where the motion on screen is coming from.
+    ///
+    /// Three sources, and the app is honest about the order: a wired node is
+    /// the best of them, this phone is a real but weaker substitute, and the
+    /// simulator is neither. Published so a screen can say which one it is
+    /// looking at without interrogating the transport.
+    enum SensorSource: String, CaseIterable, Identifiable, Sendable {
+        case node, phone, simulated
+        var id: String { rawValue }
+
+        var title: String {
+            switch self {
+            case .node: "Seismic node"
+            case .phone: "This phone"
+            case .simulated: "Simulator"
+            }
+        }
+
+        var systemImage: String {
+            switch self {
+            case .node: "sensor.tag.radiowaves.forward"
+            case .phone: "iphone.gen3.radiowaves.left.and.right"
+            case .simulated: "cpu"
+            }
+        }
+
+        /// One line, and it has to be the true one. This is the whole basis on
+        /// which somebody decides whether to trust what follows.
+        var accuracyNote: String {
+            switch self {
+            case .node:
+                "Bolted to the structure, with a thermometer against the concrete and "
+                + "actuators wired in. The only source that can apply the temperature "
+                + "correction or close your gas valve."
+            case .phone:
+                "Real measured motion, but resting on furniture rather than fixed to the "
+                + "structure, and with no thermometer — so period changes keep the "
+                + "seasonal effect in them. Good enough to detect and to warn."
+            case .simulated:
+                "Physically realistic synthetic data. Nothing here was measured."
+            }
+        }
+    }
+
+    @Published private(set) var sensorSource: SensorSource = .simulated
 
     /// The display tick. Named because the countdown haptic compares against
     /// the previous tick and needs to know how long ago that was.
@@ -264,11 +326,38 @@ final class AppEnvironment: ObservableObject {
             buildingPeriod: building?.empiricalPeriod ?? 0.85,
             buildingDamping: building?.damping ?? 0.045,
             sampleRate: 100))
+        releaseTransports()
         simulatedNode = node
+        sensorSource = .simulated
         wire(node)
         node.startScanning()
         node.connect(to: node.identifier)
         startTicking()
+    }
+
+    /// Uses the phone's own accelerometer.
+    ///
+    /// The fallback when there is no hardware, and the thing that makes the
+    /// crowd version of this app possible: a street with forty phones in it has
+    /// forty sensors. It goes through the same `NodeTransport` seam the node
+    /// and the simulator use, so the monitor, the detector, the recorder and
+    /// the assessment did not need a line changing to accept it.
+    func attachPhoneSensor() {
+        guard PhoneSensorTransport.isAvailable else {
+            appendLog("This device has no motion sensor available, so it cannot be used "
+                      + "as one. Staying on the current source.")
+            return
+        }
+        let transport = PhoneSensorTransport()
+        releaseTransports()
+        phoneSensor = transport
+        sensorSource = .phone
+        node.reset()
+        wire(transport)
+        transport.startScanning()
+        transport.connect(to: transport.identifier)
+        startTicking()
+        publishWidgetState()
     }
 
     #if canImport(CoreBluetooth)
@@ -276,12 +365,24 @@ final class AppEnvironment: ObservableObject {
     /// to `NodeSession`, which cannot tell the difference.
     func attachBluetoothTransport() {
         stopTicking()
-        simulatedNode = nil
+        releaseTransports()
+        sensorSource = .node
         let transport = BluetoothTransport()
         wire(transport)
         transport.startScanning()
     }
     #endif
+
+    /// Lets go of whichever transport was in use.
+    ///
+    /// The phone one has to be told explicitly: CoreMotion updates keep running
+    /// against a released object's queue otherwise, and the accelerometer stays
+    /// powered for the rest of the session.
+    private func releaseTransports() {
+        phoneSensor?.disconnect()
+        phoneSensor = nil
+        simulatedNode = nil
+    }
 
     private func wire(_ transport: NodeTransport) {
         session.attach(transport)
@@ -344,8 +445,12 @@ final class AppEnvironment: ObservableObject {
             .sink { [weak self] _ in
                 guard let self else { return }
                 simulatedNode?.tick(deltaTime: tickInterval)
+                phoneSensor?.tick(deltaTime: tickInterval)
                 node.update(session.snapshot())
                 updateActiveEvent()
+                // Rate-limits itself hard — a minute between even considering
+                // it — so this costs a date comparison twenty times a second.
+                baseline.consider(environment: self)
             }
     }
 
@@ -383,6 +488,11 @@ final class AppEnvironment: ObservableObject {
                                   expectedIntensity: intensity,
                                   isDrill: false)
 
+        // Handed over in one piece, now, while the app is definitely running.
+        // Everything after this the user can feel with the phone in a pocket
+        // and the screen dark.
+        Haptics.shared.startCountdown(seconds: seconds ?? 0)
+
         live.start(buildingName: selectedBuilding?.name ?? "Your building",
                    secondsUntilShaking: seconds, magnitude: magnitude,
                    intensity: intensity, isDrill: false)
@@ -402,15 +512,11 @@ final class AppEnvironment: ObservableObject {
     private func updateActiveEvent() {
         guard let event = activeEvent else { return }
 
-        // One haptic per whole second of the countdown, escalating as it runs
-        // out. The comparison is against the previous tick's whole second, so
-        // it fires exactly once per boundary rather than on every tick.
-        if let remaining = event.secondsRemaining {
-            let previous = remaining + tickInterval
-            if Int(remaining) != Int(previous) {
-                Haptics.shared.play(.countdownTick(secondsRemaining: Int(remaining)))
-            }
-        }
+        // The countdown haptic is no longer driven from here. The whole
+        // sequence is handed to the haptic engine the moment the event begins,
+        // because this tick is a main-thread timer: it stops the instant the
+        // screen locks, which is exactly when the phone is in a pocket and the
+        // taps are the only channel left. See `Haptics.startCountdown`.
 
         // The takeover clears itself once the shaking is over and the user has
         // acknowledged, so nobody is left staring at a stale warning.
@@ -440,11 +546,15 @@ final class AppEnvironment: ObservableObject {
 
     func acknowledgeActiveEvent() {
         activeEvent?.userAcknowledged = true
+        // Somebody who has said they are safe does not need to be tapped at for
+        // another nine seconds.
+        Haptics.shared.stopCountdown()
         Haptics.shared.play(.selection)
     }
 
     func dismissActiveEvent() {
         activeEvent = nil
+        Haptics.shared.stopCountdown()
         live.end()
     }
 
@@ -471,10 +581,20 @@ final class AppEnvironment: ObservableObject {
                                   expectedIntensity: .strong,
                                   isDrill: true)
         session.send(.drill(fireActuators: fireActuators))
+        Haptics.shared.startCountdown(seconds: 9)
         live.start(buildingName: selectedBuilding?.name ?? "Your building",
                    secondsUntilShaking: 9, magnitude: 6.1,
                    intensity: .strong, isDrill: true)
         Haptics.shared.play(.eventTriggered)
+    }
+
+    /// The countdown on its own, with nothing on screen.
+    ///
+    /// Rehearsal, and the reason the pattern is worth having at all: a haptic
+    /// language nobody has ever felt is not a language. This runs it with the
+    /// phone face down on a table, which is how it will actually arrive.
+    func rehearseCountdown(seconds: Double = 9) {
+        Haptics.shared.startCountdown(seconds: seconds)
     }
 
     /// Injects a simulated earthquake — the demo affordance, available from the

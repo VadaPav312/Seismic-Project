@@ -7,8 +7,22 @@ import SeismicCore
 struct SeismicWidgetBundle: WidgetBundle {
     var body: some Widget {
         BuildingStatusWidget()
-        if #available(iOS 16.2, *) {
-            SeismicEventActivity()
+        // The Live Activity needs iOS 18, one version above the rest of the app,
+        // and that is a deliberate trade rather than an oversight.
+        //
+        // Putting the countdown on a wrist means declaring a wrist-sized layout
+        // with `supplementalActivityFamilies`, which is iOS 18. A widget
+        // configuration cannot take a modifier conditionally the way a view can
+        // — the modifier returns an opaque type, so the two branches have no
+        // common type — and `WidgetBundleBuilder` only supports an availability
+        // `if`, with no `else`. So it is one or the other, and registering both
+        // would mean two configurations claiming the same activity type.
+        //
+        // On iOS 17 everything else still works: the full-screen takeover, the
+        // haptic countdown, the warning notification and the home-screen widget
+        // are all unaffected. What is lost is the Lock Screen card.
+        if #available(iOS 18.0, *) {
+            SeismicEventActivityOnWrist()
         }
     }
 }
@@ -209,10 +223,27 @@ struct BuildingStatusView: View {
 
 // MARK: - Live Activity
 
-@available(iOS 16.2, *)
-struct SeismicEventActivity: Widget {
+/// The event activity, declaring that it also has a layout small enough for a
+/// watch face.
+///
+/// This is the whole of what it takes to put the countdown on a wrist. A Live
+/// Activity started on the phone is already relayed to a paired Apple Watch's
+/// Smart Stack; without this declaration the watch has to squeeze the Lock
+/// Screen layout, which was designed around a nineteen-point instruction and
+/// does not survive the trip. Declaring the small family gets a layout drawn
+/// for the size it will actually appear at — see `LockScreenEventView`, which
+/// reads `activityFamily` and drops everything except the number and the verb.
+@available(iOS 18.0, *)
+struct SeismicEventActivityOnWrist: Widget {
     var body: some WidgetConfiguration {
-        ActivityConfiguration(for: SeismicEventAttributes.self) { context in
+        eventActivityConfiguration()
+            .supplementalActivityFamilies([.small])
+    }
+}
+
+@available(iOS 16.2, *)
+private func eventActivityConfiguration() -> some WidgetConfiguration {
+    ActivityConfiguration(for: SeismicEventAttributes.self) { context in
             LockScreenEventView(context: context)
                 .activityBackgroundTint(WidgetPalette.background)
                 .activitySystemActionForegroundColor(WidgetPalette.accent)
@@ -269,7 +300,6 @@ struct SeismicEventActivity: Widget {
             }
             .keylineTint(WidgetPalette.accent)
         }
-    }
 }
 
 /// The Lock Screen presentation.
@@ -282,6 +312,69 @@ struct LockScreenEventView: View {
     let context: ActivityViewContext<SeismicEventAttributes>
 
     var body: some View {
+        if #available(iOS 18.0, *) {
+            FamilyAwareEventView(context: context)
+        } else {
+            lockScreenLayout
+        }
+    }
+
+    /// Picks a layout from how big the surface actually is.
+    ///
+    /// `activityFamily` is `.small` on a watch and `.medium` on the phone's
+    /// Lock Screen. Reading it is the difference between a wrist showing "7"
+    /// and a wrist showing a truncated sentence about actuator confirmations.
+    @available(iOS 18.0, *)
+    private struct FamilyAwareEventView: View {
+        @Environment(\.activityFamily) private var family
+        let context: ActivityViewContext<SeismicEventAttributes>
+
+        var body: some View {
+            if family == .small {
+                LockScreenEventView(context: context).wristLayout
+            } else {
+                LockScreenEventView(context: context).lockScreenLayout
+            }
+        }
+    }
+
+    /// A watch face at arm's length, mid-earthquake. Two things fit: how long
+    /// you have, and what to do. Nothing else earns its place — the building
+    /// name, the magnitude and the actuator tally are all things you would only
+    /// read afterwards, and afterwards you will have your phone.
+    var wristLayout: some View {
+        VStack(spacing: 0) {
+            if let seconds = context.state.secondsUntilShaking, seconds > 0 {
+                Text("\(seconds)")
+                    .font(.system(size: 44, weight: .heavy, design: .rounded))
+                    .monospacedDigit()
+                    .minimumScaleFactor(0.5)
+                    .lineLimit(1)
+                    .foregroundStyle(WidgetPalette.textPrimary)
+            } else {
+                Image(systemName: context.state.stage.systemImage)
+                    .font(.system(size: 30, weight: .semibold))
+                    .foregroundStyle(WidgetPalette.colour(for: context.state.verdict))
+            }
+
+            Text(context.state.stage.instruction)
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(WidgetPalette.textPrimary)
+                .lineLimit(2)
+                .minimumScaleFactor(0.7)
+                .multilineTextAlignment(.center)
+
+            if context.state.isDrill {
+                Text("DRILL")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(WidgetPalette.accent)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(6)
+    }
+
+    var lockScreenLayout: some View {
         HStack(alignment: .center, spacing: 14) {
             VStack(spacing: 2) {
                 Image(systemName: context.state.stage.systemImage)

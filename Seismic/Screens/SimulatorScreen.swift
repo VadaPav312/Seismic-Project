@@ -35,6 +35,17 @@ struct SimulatorScreen: View {
     @State private var showsModeShapes = false
     @State private var selectedMode = 1
     @State private var intensityScale: Double = 1.0
+    /// Whether the neighbouring buildings are in the scene.
+    ///
+    /// Off by default. One building alone is the clearer picture for
+    /// understanding *this* building, which is what the screen is mostly for;
+    /// the street answers a different question — how it compares — and is worth
+    /// asking for.
+    @State private var showsStreet = false
+    /// The collapse search. Dozens of full time histories, so it runs on
+    /// demand and never as a side effect of opening a screen.
+    @State private var ida: IncrementalDynamicAnalysis.Result?
+    @State private var isRunningIDA = false
 
     /// The building being shaken, which is the app's current building and not a
     /// second copy of that choice.
@@ -107,9 +118,40 @@ struct SimulatorScreen: View {
         .onReceive(runner.$frame) { frame in
             guard let frame else { return }
             controller.apply(displacements: frame.displacements, drifts: frame.drifts)
+            // The street is driven by the ground, not by the solver — see
+            // `BuildingSceneController.swayStreet`.
+            if showsStreet {
+                controller.swayStreet(groundDisplacement: frame.groundDisplacement,
+                                      dominantPeriod: record?.dominantPeriod
+                                          ?? runner.result?.initialPeriod ?? 0.5)
+            }
             if frame.shakingIntensity > 0.15 {
                 Haptics.shared.playShaking(intensity: frame.shakingIntensity)
             }
+        }
+        .onChange(of: showsStreet) { _, isOn in applyStreet(isOn) }
+        .task(id: env.selectedBuildingID) {
+            guard showsStreet, let building else { return }
+            await env.block.fetch(for: building, using: env.services)
+            applyStreet(true)
+        }
+    }
+
+    /// Puts the neighbours in the scene, fetching them the first time.
+    private func applyStreet(_ isOn: Bool) {
+        guard let building else { return }
+        guard isOn else {
+            controller.clearStreet()
+            return
+        }
+        let neighbours = env.block.neighbours(of: building.id)
+        if neighbours.isEmpty {
+            Task {
+                await env.block.fetch(for: building, using: env.services)
+                controller.setStreet(env.block.neighbours(of: building.id))
+            }
+        } else {
+            controller.setStreet(neighbours)
         }
     }
 
@@ -126,6 +168,22 @@ struct SimulatorScreen: View {
         controller.build(building, animated: false)
         runner.prepare(building: building)
         refreshModes(for: building)
+        markPhotographedStoreys()
+        applyStreet(showsStreet)
+    }
+
+    /// Puts a pin on every storey somebody has photographed damage on.
+    ///
+    /// Rebuilt with the geometry rather than tracked separately, because the
+    /// storey nodes they hang off are thrown away and recreated on every
+    /// `build`, and a pin attached to a node that no longer exists is a pin
+    /// that silently stops appearing.
+    private func markPhotographedStoreys() {
+        guard let building else { return }
+        let storeys = env.store.notesList()
+            .filter { $0.buildingID == building.id }
+            .compactMap(\.storey)
+        controller.markPhotographedStoreys(Set(storeys))
     }
 
     /// Recomputed only when the building actually changes.
@@ -493,6 +551,254 @@ struct SimulatorScreen: View {
                 exploreButton("Side by side", "rectangle.split.2x1") { showsComparison = true }
                 exploreButton("In the room", "arkit") { showsAR = true }
             }
+            streetControl
+            capacityControl
+        }
+    }
+
+    /// How much the building had left, rather than what one earthquake did.
+    ///
+    /// Everything else on this screen answers "what happened". These answer
+    /// "how close was that", which is the question somebody actually has after
+    /// their building survives something — and it cannot be answered by
+    /// replaying the record they already saw.
+    @ViewBuilder
+    private var capacityControl: some View {
+        if let building {
+            VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+                SectionLabel("How much it could take", systemImage: "gauge.with.needle")
+
+                if let capacity {
+                    ReadoutGrid(readouts: [
+                        Readout(label: "Ductility",
+                                value: String(format: "%.1f", capacity.ductility), unit: "×",
+                                tint: capacity.ductility > 3 ? Theme.Palette.accent
+                                                             : Theme.Palette.verdictAmber,
+                                size: .small,
+                                caption: "how far past yield before a mechanism"),
+                        Readout(label: "Yields at",
+                                value: String(format: "%.0f",
+                                              capacity.yieldShear / 1000), unit: "kN",
+                                size: .small),
+                    ], columns: 2)
+
+                    if let point = performancePoint {
+                        Divider().overlay(Theme.Palette.hairline)
+                        Readout(label: "Performance point",
+                                value: String(format: "%.0f", point.roofDisplacement * 1000),
+                                unit: "mm",
+                                tint: point.converged ? Theme.Palette.accent
+                                                      : Theme.Palette.verdictRed,
+                                size: .large,
+                                caption: point.converged
+                                    ? String(format: "ductility demand %.1f×",
+                                             point.ductilityDemand)
+                                    : "no equilibrium — the demand exceeds the capacity")
+                        Text(point.plainMeaning)
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Palette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text("Found by intersecting the building's capacity curve with this "
+                             + "earthquake's demand spectrum, both converted into the same "
+                             + "axes. The demand is reduced for the extra damping a building "
+                             + "past yield produces — which depends on where the curves "
+                             + "cross, so it is solved by iterating to a fixed point.")
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                // P-delta, which only matters for a tall flexible building —
+                // and says so plainly when it does not.
+                if let worst = stabilityWorstStorey {
+                    Divider().overlay(Theme.Palette.hairline)
+                    HStack(alignment: .top, spacing: 10) {
+                        Readout(label: "Stability θ",
+                                value: String(format: "%.3f", worst.theta),
+                                tint: worst.classification == .negligible
+                                    ? Theme.Palette.textPrimary : Theme.Palette.verdictAmber,
+                                size: .small,
+                                caption: "storey \(worst.storey), worst")
+                        Readout(label: "Drift amplified",
+                                value: String(format: "%.2f", worst.amplification), unit: "×",
+                                size: .small)
+                    }
+                    Text(worst.classification.explanation)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                // Soil, which is the one that can make an undamaged building
+                // read as damaged.
+                if let soil {
+                    Divider().overlay(Theme.Palette.hairline)
+                    ReadoutGrid(readouts: [
+                        Readout(label: "Fixed base",
+                                value: String(format: "%.3f", soil.fixedBasePeriod), unit: "s",
+                                size: .small),
+                        Readout(label: "On this soil",
+                                value: String(format: "%.3f", soil.flexibleBasePeriod),
+                                unit: "s",
+                                tint: soil.periodLengthening > 0.05
+                                    ? Theme.Palette.verdictAmber : Theme.Palette.accent,
+                                size: .small),
+                    ], columns: 2)
+                    Text(soil.significance)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(soil.periodLengthening > 0.05
+                                         ? Theme.Palette.textSecondary
+                                         : Theme.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Button {
+                    runIDA()
+                } label: {
+                    Label(ida == nil ? "Find where it breaks"
+                                     : "Run the collapse search again",
+                          systemImage: "arrow.up.forward.circle")
+                        .font(Theme.Typography.callout)
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(SecondaryButtonStyle())
+                .disabled(isRunningIDA || record == nil)
+
+                if isRunningIDA {
+                    MeaningfulProgress(
+                        title: "Scaling the record up",
+                        detail: "A full nonlinear time history at each intensity, until the "
+                              + "building fails. There is no cheaper way — the whole thing "
+                              + "being measured is the nonlinearity.")
+                } else if let ida {
+                    Text(ida.plainMeaning)
+                        .font(Theme.Typography.callout)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    ForEach(ida.curve) { point in
+                        HStack {
+                            Text(String(format: "×%.2g", point.scale))
+                                .font(Theme.Typography.numericSmall)
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                                .frame(width: 46, alignment: .leading)
+                            GeometryReader { proxy in
+                                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                    .fill(point.collapsed ? Theme.Palette.verdictRed
+                                                          : Theme.Palette.accent)
+                                    .frame(width: max(proxy.size.width
+                                                      * min(point.maximumDrift / 0.05, 1), 2))
+                            }
+                            .frame(height: 10)
+                            Text(String(format: "%.2f%%", point.maximumDrift * 100))
+                                .font(Theme.Typography.numericSmall)
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                                .frame(width: 58, alignment: .trailing)
+                        }
+                    }
+                }
+            }
+            .padding(.top, Theme.Metrics.spacingTight)
+        }
+    }
+
+    /// The capacity curve. Cheap enough to compute in a view, unlike the IDA.
+    private var capacity: Pushover.Capacity? {
+        guard let building else { return nil }
+        return Pushover.run(ShearBuilding.from(building))
+    }
+
+    /// The demand this earthquake makes, in the form the capacity spectrum
+    /// method wants: spectral acceleration against period.
+    private var performancePoint: CapacitySpectrum.PerformancePoint? {
+        guard let building, let capacity,
+              let ground = record?.waveform else { return nil }
+        let spectrum = ResponseSpectrumAnalysis.compute(ground)
+        guard !spectrum.isEmpty else { return nil }
+        let demand = zip(spectrum.periods, spectrum.sa).map {
+            (period: $0, acceleration: $1)
+        }
+        return CapacitySpectrum.performancePoint(
+            capacity: capacity, building: ShearBuilding.from(building), demand: demand)
+    }
+
+    /// The storey P-delta hurts most, from the drifts the last run produced.
+    private var stabilityWorstStorey: PDelta.StoreyStability? {
+        guard let building, let result = runner.result else { return nil }
+        let model = ShearBuilding.from(building)
+        let drifts = result.storeyResults.map { $0.peakDrift * model.storeys[
+            min($0.storey - 1, model.storeys.count - 1)].height }
+        guard drifts.count == model.storeys.count else { return nil }
+        return PDelta.analyse(model, drifts: drifts).max { $0.theta < $1.theta }
+    }
+
+    private var soil: SoilStructureInteraction.Result? {
+        guard let building else { return nil }
+        return SoilStructureInteraction.analyse(
+            ShearBuilding.from(building),
+            foundation: .init(radius: max((building.footprintArea / .pi).squareRoot(), 3),
+                              shearWaveVelocity: building.soil.shearWaveVelocity))
+    }
+
+    private func runIDA() {
+        guard let building, let record else { return }
+        isRunningIDA = true
+        let model = ShearBuilding.from(building)
+        let thresholds = DriftThresholds.forSystem(building.system, material: building.material)
+        guard let ground = record.waveform else { isRunningIDA = false; return }
+
+        Task.detached(priority: .userInitiated) {
+            let result = IncrementalDynamicAnalysis.run(model, ground: ground,
+                                                        thresholds: thresholds)
+            await MainActor.run {
+                ida = result
+                isRunningIDA = false
+                Haptics.shared.play(.assessmentComplete)
+            }
+        }
+    }
+
+    /// The whole street, shaken by the same earthquake.
+    ///
+    /// A single building swaying on a black background answers a question
+    /// nobody was asking — everybody already knows buildings move. What people
+    /// want to know is whether *theirs* moves more than the one next door, and
+    /// that is a comparison one building cannot make. The neighbours come from
+    /// OpenStreetMap, need no key, and are drawn as plain grey massing so it
+    /// stays obvious which building in the scene is the one being assessed.
+    private var streetControl: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Toggle(isOn: $showsStreet) {
+                HStack(spacing: 6) {
+                    Label("Shake the whole street", systemImage: "building.2.crop.circle")
+                        .font(Theme.Typography.callout)
+                    if env.block.isFetching.contains(building?.id ?? UUID()) {
+                        ProgressView().controlSize(.mini)
+                    }
+                }
+            }
+            .tint(Theme.Palette.accent)
+
+            if showsStreet, let summary = env.block.summary(for: building?.id) {
+                Text(summary)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if showsStreet, controller.hasStreet {
+                // The caveat that has to travel with the picture. The
+                // neighbours are single-degree-of-freedom approximations from
+                // an outline and a storey count — good enough to show
+                // resonance, nowhere near good enough to conclude anything
+                // about somebody else's building.
+                Text("Your building is solved storey by storey. The neighbours are "
+                     + "approximations from their outlines, so watch which ones move — "
+                     + "not by how much.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 
@@ -684,10 +990,20 @@ final class SimulationRunner: ObservableObject {
         var displacements: [Double]
         var drifts: [Double]
         var shakingIntensity: Double
+        /// Where the ground itself is, this instant, in metres.
+        ///
+        /// Carried because the neighbouring buildings are driven by it and by
+        /// nothing else — they have no solver, so the only thing shaking them
+        /// is the same ground that shakes the assessed building.
+        var groundDisplacement: Double = 0
     }
 
     @Published private(set) var frame: Frame?
     @Published private(set) var result: SimulationResult?
+
+    /// Ground displacement per step, integrated once and kept, because
+    /// integrating the whole record on every frame would be absurd.
+    private var groundDisplacementCache: [Double] = []
     @Published private(set) var isRunning = false
     /// Stopped part-way through, with the response still loaded.
     ///
@@ -718,6 +1034,7 @@ final class SimulationRunner: ObservableObject {
         thresholds = DriftThresholds.forSystem(building.system, material: building.material)
         result = nil
         frame = nil
+        groundDisplacementCache = []
         isPaused = false
         currentTime = 0
         duration = 0
@@ -739,6 +1056,7 @@ final class SimulationRunner: ObservableObject {
             await MainActor.run { [weak self] in
                 guard let self else { return }
                 result = solved
+                groundDisplacementCache = []
                 duration = solved.times.last ?? 0
                 index = 0
                 startPlayback()
@@ -781,6 +1099,34 @@ final class SimulationRunner: ObservableObject {
     /// Resumes if paused, pauses if running. What the one button does.
     func togglePause() { isPaused ? resume() : pause() }
 
+    /// The ground's displacement at a step, integrated once from the
+    /// acceleration record and cached.
+    ///
+    /// Twice-integrated accelerometer data drifts badly, so the running mean is
+    /// removed first — enough for a visual, and it is only ever used as one.
+    /// Nothing numeric on screen comes from this.
+    private func groundDisplacement(at step: Int) -> Double {
+        guard let result else { return 0 }
+        if groundDisplacementCache.isEmpty {
+            let samples = result.groundMotion.samples
+            guard samples.count > 1 else { return 0 }
+            let dt = 1 / max(result.groundMotion.sampleRate, 1)
+            var velocity = 0.0, displacement = 0.0
+            var series: [Double] = []
+            series.reserveCapacity(samples.count)
+            for value in samples {
+                velocity += value * dt
+                velocity *= 0.995            // bleeds off integration drift
+                displacement += velocity * dt
+                displacement *= 0.995
+                series.append(displacement)
+            }
+            groundDisplacementCache = series
+        }
+        guard step >= 0, step < groundDisplacementCache.count else { return 0 }
+        return groundDisplacementCache[step]
+    }
+
     private func advance() {
         guard let result, index < result.times.count else {
             isRunning = false
@@ -792,7 +1138,9 @@ final class SimulationRunner: ObservableObject {
         let displacements = index < result.displacement.count ? result.displacement[index] : []
         let drifts = index < result.drift.count ? result.drift[index] : []
         let intensity = drifts.map(abs).max().map { min($0 / 0.02, 1) } ?? 0
-        frame = Frame(displacements: displacements, drifts: drifts, shakingIntensity: intensity)
+        frame = Frame(displacements: displacements, drifts: drifts,
+                      shakingIntensity: intensity,
+                      groundDisplacement: groundDisplacement(at: index))
         index += 1
     }
 
@@ -802,7 +1150,8 @@ final class SimulationRunner: ObservableObject {
         currentTime = result.times[index]
         let displacements = index < result.displacement.count ? result.displacement[index] : []
         let drifts = index < result.drift.count ? result.drift[index] : []
-        frame = Frame(displacements: displacements, drifts: drifts, shakingIntensity: 0)
+        frame = Frame(displacements: displacements, drifts: drifts, shakingIntensity: 0,
+                      groundDisplacement: groundDisplacement(at: index))
         // Dragging the scrubber on a finished run leaves it ready to play on
         // from there, rather than stranded with a Resume button that does
         // nothing.

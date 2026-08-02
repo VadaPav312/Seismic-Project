@@ -233,6 +233,48 @@ struct SettingsScreen: View {
     @AppStorage("hapticsEnabled") private var hapticsEnabled = true
 }
 
+/// Whether this phone can write the explanation itself.
+///
+/// Worth its own row because it changes the answer to "do I need to sign up for
+/// anything". On a device with Apple Intelligence the answer is no: there is a
+/// real model here, it costs nothing, and the building's measurements never
+/// leave the phone. When it is unavailable the reason is one the user can
+/// actually act on — a setting to turn on, a download to wait for, or a device
+/// that simply cannot.
+struct OnDeviceModelRow: View {
+    @EnvironmentObject private var env: AppEnvironment
+    @State private var unavailableReason: String?
+    @State private var hasChecked = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label("On-device model", systemImage: "apple.intelligence")
+                    .font(Theme.Typography.callout)
+                Spacer()
+                StatusPill(text: hasChecked ? (unavailableReason == nil ? "Available"
+                                                                       : "Unavailable")
+                                            : "Checking",
+                           tint: unavailableReason == nil && hasChecked
+                               ? Theme.Palette.accent : Theme.Palette.textSecondary)
+            }
+
+            Text(unavailableReason
+                 ?? "Apple Intelligence writes the explanation on this phone. It is used "
+                  + "after any key you have added and before the written fallback, it costs "
+                  + "nothing, and the measurements never leave the device. Its answers are "
+                  + "checked for invented figures exactly like a remote model's.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .task {
+            unavailableReason = await env.services.analyst.onDeviceModelUnavailableReason
+            hasChecked = true
+        }
+    }
+}
+
 /// Per-key management, with the status the specification calls for.
 struct APIKeysScreen: View {
     @EnvironmentObject private var env: AppEnvironment
@@ -249,6 +291,13 @@ struct APIKeysScreen: View {
                      + "live.")
                     .font(Theme.Typography.caption)
                     .foregroundStyle(Theme.Palette.textSecondary)
+            }
+
+            // The model that came with the phone, stated before the list of
+            // keys rather than after it. Somebody about to sign up for an
+            // inference account should know there is already one here.
+            Section {
+                OnDeviceModelRow()
             }
 
             Section {

@@ -59,10 +59,16 @@ final class Haptics: ObservableObject {
 
     #if canImport(CoreHaptics)
     private var engine: CHHapticEngine?
+    private var countdownPlayer: CHHapticPatternPlayer?
     private var supportsHaptics: Bool {
         CHHapticEngine.capabilitiesForHardware().supportsHaptics
     }
     #endif
+
+    /// Scheduled taps for devices with no Taptic Engine, held so they can be
+    /// cancelled — a countdown that keeps tapping after the user has said they
+    /// are safe is a countdown nobody trusts twice.
+    private var fallbackWork: [DispatchWorkItem] = []
 
     private init() { prepare() }
 
@@ -118,6 +124,135 @@ final class Haptics: ObservableObject {
             }
         case .warning:
             notify(.warning)
+        }
+        #endif
+    }
+
+    // MARK: The countdown you can feel
+
+    /// Plays the whole countdown as one choreographed pattern.
+    ///
+    /// The problem this solves is not "the phone should buzz". The app already
+    /// tapped once per second from the display tick. The problem is that the
+    /// display tick is a main-thread timer: it stops when the screen locks,
+    /// stutters when a 3D scene is being drawn, and cannot produce a sustained
+    /// vibration at all — `UIImpactFeedbackGenerator` only does discrete taps.
+    /// So the one moment the phone most needed to be in somebody's pocket
+    /// telling them something was the moment it went quiet.
+    ///
+    /// Handing the entire sequence to the haptic engine up front fixes all
+    /// three. The engine schedules it against the audio clock, so it plays on
+    /// time regardless of what the app is doing, and it can hold a continuous
+    /// rumble for the arrival.
+    ///
+    /// The pattern is a language, and it is meant to be learnable:
+    ///
+    /// * far out — soft, widely spaced taps, one a second
+    /// * closing — the taps sharpen and get closer together
+    /// * last three seconds — two hard taps a second, unmistakable
+    /// * arrival — a two-second continuous rumble, the only sustained
+    ///   vibration this app ever produces
+    ///
+    /// Nobody learns that during an earthquake, which is why it can be
+    /// rehearsed from Preparedness.
+    func startCountdown(seconds: Double) {
+        #if canImport(CoreHaptics)
+        guard isEnabled, supportsHaptics else {
+            // Without a Taptic Engine there is still a phone that can vibrate.
+            // Falling back to the old per-second tap is much worse, and much
+            // better than silence.
+            fallbackCountdown(seconds: seconds)
+            return
+        }
+        stopCountdown()
+        if engine == nil { prepare() }
+
+        var events: [CHHapticEvent] = []
+        let total = min(max(seconds, 0), 60)
+
+        var t = 0.0
+        while t < total {
+            let remaining = total - t
+            // Intensity and sharpness both climb as the time runs out, so the
+            // taps do not merely speed up — they harden.
+            let urgency = 1 - min(remaining / 12, 1)
+            let intensity = Float(0.45 + 0.55 * urgency)
+            let sharpness = Float(0.3 + 0.7 * urgency)
+            events.append(CHHapticEvent(
+                eventType: .hapticTransient,
+                parameters: [
+                    .init(parameterID: .hapticIntensity, value: intensity),
+                    .init(parameterID: .hapticSharpness, value: sharpness),
+                ],
+                relativeTime: t))
+
+            // Inside the last three seconds there is a second tap between the
+            // beats. The doubling is the cue that means "now".
+            if remaining <= 3 {
+                events.append(CHHapticEvent(
+                    eventType: .hapticTransient,
+                    parameters: [
+                        .init(parameterID: .hapticIntensity, value: 1.0),
+                        .init(parameterID: .hapticSharpness, value: 1.0),
+                    ],
+                    relativeTime: t + 0.5))
+            }
+            t += 1
+        }
+
+        // Arrival. The only continuous event in the app, so it cannot be
+        // confused with anything else it does.
+        events.append(CHHapticEvent(
+            eventType: .hapticContinuous,
+            parameters: [
+                .init(parameterID: .hapticIntensity, value: 1.0),
+                .init(parameterID: .hapticSharpness, value: 0.55),
+            ],
+            relativeTime: total, duration: 2.0))
+
+        do {
+            let pattern = try CHHapticPattern(events: events, parameters: [])
+            countdownPlayer = try engine?.makePlayer(with: pattern)
+            try countdownPlayer?.start(atTime: CHHapticTimeImmediate)
+        } catch {
+            fallbackCountdown(seconds: total)
+        }
+        #else
+        fallbackCountdown(seconds: seconds)
+        #endif
+    }
+
+    func stopCountdown() {
+        #if canImport(CoreHaptics)
+        try? countdownPlayer?.stop(atTime: CHHapticTimeImmediate)
+        countdownPlayer = nil
+        #endif
+        fallbackWork.forEach { $0.cancel() }
+        fallbackWork.removeAll()
+    }
+
+    /// Whether the choreographed version is what will actually play. Reported so
+    /// the rehearsal screen can describe what the user is about to feel rather
+    /// than promising a pattern this device cannot produce.
+    var canPlayChoreographedCountdown: Bool {
+        #if canImport(CoreHaptics)
+        return supportsHaptics
+        #else
+        return false
+        #endif
+    }
+
+    private func fallbackCountdown(seconds: Double) {
+        #if canImport(UIKit)
+        guard isEnabled else { return }
+        let total = Int(min(max(seconds, 0), 60))
+        for second in 0..<total {
+            let remaining = total - second
+            let item = DispatchWorkItem { [weak self] in
+                self?.play(.countdownTick(secondsRemaining: remaining))
+            }
+            fallbackWork.append(item)
+            DispatchQueue.main.asyncAfter(deadline: .now() + Double(second), execute: item)
         }
         #endif
     }

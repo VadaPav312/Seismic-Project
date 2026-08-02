@@ -177,4 +177,15 @@ extension NodeSession: NodeSessionMeasuring {
     func measurePeriod(band: ClosedRange<Double>) -> PeriodEstimation.CrossCheckedPeriod {
         measurePeriodFromAmbient(band: band)
     }
+
+    /// The same measurement, on a channel the caller has already prepared.
+    ///
+    /// Exists so the overnight scheduler can cancel plant noise before the
+    /// period is picked off, without that filtering having to live inside the
+    /// session — which streams from a node and should not know what an adaptive
+    /// filter is.
+    func measurePeriod(of waveform: Waveform,
+                       band: ClosedRange<Double>) -> PeriodEstimation.CrossCheckedPeriod {
+        PeriodEstimation.crossChecked(waveform, band: band)
+    }
 }

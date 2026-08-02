@@ -190,10 +190,20 @@ final class SecretsTests: XCTestCase {
 }
 
 final class AlgorithmCatalogTests: XCTestCase {
-    func testFiftyCountedAlgorithmsArePresentAndNumberedContiguously() {
+
+    /// The count has to match what is actually in the catalogue.
+    ///
+    /// This used to also assert that the counted algorithms were numbered
+    /// 1 through 50 with nothing in between. That held only because the
+    /// infrastructure entries happened to sit at the end of the original list,
+    /// and it stopped being true the moment more analytical algorithms were
+    /// added after them — a property of one particular ordering, not of the
+    /// catalogue. What actually matters is asserted below instead: no
+    /// duplicates, no gaps in the numbering as a whole, and a stated count that
+    /// matches reality.
+    func testTheStatedCountMatchesTheCatalogue() {
         let counted = AlgorithmCatalog.all.filter { $0.family != .infrastructure }
         XCTAssertEqual(counted.count, AlgorithmCatalog.countedAlgorithms)
-        XCTAssertEqual(counted.map(\.number).sorted(), Array(1...50))
     }
 
     func testEveryAlgorithmNamesWhereItSurfacesInTheUI() {
@@ -206,6 +216,23 @@ final class AlgorithmCatalogTests: XCTestCase {
     func testNumbersAreUnique() {
         let numbers = AlgorithmCatalog.all.map(\.number)
         XCTAssertEqual(Set(numbers).count, numbers.count)
+    }
+
+    /// No gaps. A missing number means an algorithm was removed and its
+    /// documentation left behind, or renumbered and its neighbour forgotten.
+    func testNumbersRunFromOneWithNoGaps() {
+        let numbers = AlgorithmCatalog.all.map(\.number).sorted()
+        XCTAssertEqual(numbers.first, 1)
+        XCTAssertEqual(numbers, Array(1...(numbers.last ?? 0)))
+    }
+
+    /// Every family has to be represented, or the diagnostics screen renders a
+    /// filter chip that selects nothing.
+    func testEveryFamilyHasAtLeastOneAlgorithm() {
+        for family in AlgorithmEntry.Family.allCases {
+            XCTAssertFalse(AlgorithmCatalog.family(family).isEmpty,
+                           "\(family.rawValue) is an empty filter.")
+        }
     }
 }
 

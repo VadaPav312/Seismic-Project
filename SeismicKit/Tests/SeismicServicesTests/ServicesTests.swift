@@ -166,13 +166,28 @@ final class AIAnalystTests: XCTestCase {
 
     /// The default experience: no keys at all. It must still produce a real
     /// paragraph, not an error and not an empty string.
+    ///
+    /// Two things can serve it now — Apple's on-device model where the device
+    /// has one, and the written narrator everywhere else — so this asserts what
+    /// is actually promised rather than which of the two answered. What is
+    /// promised is that the answer is grounded, mentions the verdict, and never
+    /// left the device.
     func testFallsBackToTheDeviceWithNoKeys() async {
         let analyst = AIAnalyst(vault: vault(), transport: StubHTTPTransport())
         let answer = await analyst.answer(sampleRequest)
         XCTAssertEqual(answer.origin, .onDevice)
-        XCTAssertFalse(answer.value.isAIGenerated)
-        XCTAssertTrue(answer.value.text.contains("LIMITED USE"))
+        XCTAssertTrue(answer.value.text.uppercased().contains("LIMITED USE"))
         XCTAssertGreaterThan(answer.value.text.count, 120)
+        XCTAssertTrue(GroundingCheck.passes(answer.value.text, given: sampleRequest),
+                      answer.value.text)
+    }
+
+    /// With no keys and no on-device model, it is the written narrator, and the
+    /// answer is honestly marked as not having been written by a model.
+    func testTheWrittenNarratorIsNotPassedOffAsAModel() {
+        let text = OnDeviceNarrator.narrate(sampleRequest)
+        XCTAssertTrue(text.uppercased().contains("LIMITED USE"))
+        XCTAssertGreaterThan(text.count, 120)
     }
 
     func testUsesCerebrasWhenItsKeyIsPresent() async {
@@ -271,6 +286,65 @@ final class AIAnalystTests: XCTestCase {
         let spoken = OnDeviceNarrator.narrate(request)
         XCTAssertTrue(spoken.lowercased().contains("stay outside"))
         XCTAssertLessThan(spoken.split(separator: " ").count, 30)
+    }
+
+    // MARK: The narrator varies its wording, but never its figures
+
+    /// The same evidence has to read the same way every time it is asked for.
+    /// Otherwise reopening a screen rewrites the paragraph under the reader,
+    /// and a screenshot stops matching the app.
+    func testTheSameAssessmentIsNarratedIdenticallyEveryTime() {
+        let first = OnDeviceNarrator.narrate(sampleRequest)
+        let second = OnDeviceNarrator.narrate(sampleRequest)
+        let third = OnDeviceNarrator.narrate(sampleRequest)
+        XCTAssertEqual(first, second)
+        XCTAssertEqual(second, third)
+    }
+
+    /// And different evidence has to read differently, which is the whole
+    /// point: a paragraph that looks identical after every event is a
+    /// paragraph people stop reading, including the once it mattered.
+    func testDifferentAssessmentsAreNarratedDifferently() {
+        func request(before: String, after: String) -> AnalystRequest {
+            AnalystRequest(
+                task: .assessmentNarrative, subject: "Ashby Court",
+                facts: [AnalystFact(label: "Period before", value: before),
+                        AnalystFact(label: "Period after", value: after)],
+                constraints: ["The verdict is LIMITED USE"],
+                question: "What changed?")
+        }
+
+        let wordings = Set([
+            OnDeviceNarrator.narrate(request(before: "0.912 s", after: "1.031 s")),
+            OnDeviceNarrator.narrate(request(before: "0.640 s", after: "0.702 s")),
+            OnDeviceNarrator.narrate(request(before: "1.220 s", after: "1.410 s")),
+            OnDeviceNarrator.narrate(request(before: "0.410 s", after: "0.455 s")),
+        ])
+        XCTAssertGreaterThan(wordings.count, 1,
+                             "Four different assessments produced one single wording.")
+    }
+
+    /// The variation is in the sentence frames only. Every figure has to
+    /// survive verbatim — which is also why the narrator passes the same
+    /// grounding check that polices a remote model.
+    func testVariedWordingStillCarriesEveryFigureExactly() {
+        let text = OnDeviceNarrator.narrate(sampleRequest)
+        XCTAssertTrue(text.contains("0.912 s"), text)
+        XCTAssertTrue(text.contains("1.043 s"), text)
+        XCTAssertTrue(GroundingCheck.passes(text, given: sampleRequest), text)
+    }
+
+    /// A generated sentence that opens the same way as the one before it is the
+    /// single most obvious tell. The assembler drops the repeat.
+    func testNoTwoAdjacentSentencesOpenTheSameWay() {
+        let text = OnDeviceNarrator.narrate(sampleRequest)
+        let openings = text.split(separator: ".").map {
+            $0.trimmingCharacters(in: .whitespaces)
+                .split(separator: " ").prefix(2).joined(separator: " ").lowercased()
+        }
+        for (a, b) in zip(openings, openings.dropFirst()) {
+            XCTAssertNotEqual(a, b, "Two sentences in a row start with \"\(a)\".")
+        }
     }
 }
 

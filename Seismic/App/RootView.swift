@@ -7,6 +7,7 @@ import SeismicStructures
 enum AppSection: String, CaseIterable, Identifiable, Hashable {
     case home, monitor, simulator, map, library, node, assess, feed
     case prepare, household, network, shakeTable, analysis, settings
+    case device, channels
     var id: String { rawValue }
 
     var title: String {
@@ -25,6 +26,8 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .shakeTable: "Shake table"
         case .analysis: "Analysis"
         case .settings: "Settings"
+        case .device: "Hardware"
+        case .channels: "Sensors"
         }
     }
 
@@ -44,16 +47,23 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
         case .shakeTable: "slider.horizontal.below.rectangle"
         case .analysis: "waveform.and.magnifyingglass"
         case .settings: "gearshape"
+        case .device: "cpu"
+        case .channels: "chart.bar.doc.horizontal"
         }
     }
 
-    /// The five that get a tab. The rest are reached from Home and from the
-    /// More menu — a bar of nine icons is a bar nobody can use in a hurry.
-    static let primary: [AppSection] = [.home, .monitor, .simulator, .map, .library]
-    /// Reached from the More menu. Settings is deliberately absent — it has its
-    /// own button in the toolbar.
-    static let secondary: [AppSection] = [.assess, .analysis, .node, .feed, .prepare,
-                                          .household, .network, .shakeTable]
+    /// The four that get a tab — two either side of the orb. A bar of nine
+    /// icons is a bar nobody can use in a hurry.
+    static let primary: [AppSection] = [.home, .monitor, .simulator, .map]
+    /// Reached from the orb, fanned out across an arc. Ordered as they will be
+    /// read around that arc — left to right, and so roughly in the order the
+    /// app is used: what happened, what it means, where it came from, then the
+    /// things you do about it. Settings is deliberately absent; it has its own
+    /// button in the toolbar because it is the one destination people go
+    /// looking for by habit.
+    static let secondary: [AppSection] = [.assess, .channels, .device, .analysis, .library,
+                                          .node, .feed, .prepare, .household, .network,
+                                          .shakeTable]
 }
 
 struct RootView: View {
@@ -74,6 +84,9 @@ struct RootView: View {
     /// by `SEISMIC_INITIAL_TAB` — would set a tab selection that matches no tab
     /// and silently leave the user on Home.
     @State private var presented: AppSection?
+
+    /// Whether the orb's fan of secondary sections is open.
+    @State private var isBloomOpen = false
 
     var body: some View {
         ZStack {
@@ -228,6 +241,10 @@ struct RootView: View {
         }
     }
 
+    private func closeBloom() {
+        withAnimation(Theme.Motion.standard) { isBloomOpen = false }
+    }
+
     /// The one way to get anywhere. A primary section changes the tab; a
     /// secondary one is presented over it.
     private func show(_ section: AppSection) {
@@ -305,21 +322,72 @@ struct RootView: View {
         }
     }
 
+    /// The interface proper: a `TabView` with its own bar hidden, and this
+    /// app's dock floating over it.
+    ///
+    /// Hiding the system bar rather than abandoning `TabView` is deliberate.
+    /// `TabView` is what keeps each section's navigation stack and scroll
+    /// position alive while you are elsewhere, and what stops all four screens
+    /// — one of which is a live 3D simulation — being built at once. Swapping
+    /// it for a `ZStack` of screens would have cost both, and bought nothing
+    /// the dock could not get by simply being drawn on top.
     private var mainInterface: some View {
-        TabView(selection: $selection) {
-            ForEach(AppSection.primary) { section in
-                NavigationStack {
-                    destination(for: section)
-                        .seismicBackground()
-                        .navigationTitle(section.title)
-                        .navigationBarTitleDisplayMode(section == .simulator ? .inline : .large)
-                        .toolbar { toolbarContent(for: section) }
+        Group {
+            TabView(selection: $selection) {
+                ForEach(AppSection.primary) { section in
+                    NavigationStack {
+                        destination(for: section)
+                            .seismicBackground()
+                            .navigationTitle(section.title)
+                            .navigationBarTitleDisplayMode(section == .simulator ? .inline : .large)
+                            .toolbar { toolbarContent(for: section) }
+                            .toolbar(.hidden, for: .tabBar)
+                            // The dock floats, so nothing reserves space for it
+                            // any more. Without this the last row of every
+                            // scrolling screen sits underneath it.
+                            .safeAreaInset(edge: .bottom) {
+                                Color.clear.frame(height: OrbDock.clearance)
+                            }
+                    }
+                    .tabItem { Label(section.title, systemImage: section.systemImage) }
+                    .tag(section)
                 }
-                .tabItem { Label(section.title, systemImage: section.systemImage) }
-                .tag(section)
+            }
+            .tint(Theme.Palette.accent)
+        }
+        // Two overlays rather than a `ZStack` of three siblings, because the
+        // fan positions its tiles absolutely and needs a container that is
+        // exactly the screen. As one of several children of a `ZStack` it gets
+        // whatever size that stack settled on, and everything it places lands
+        // somewhere else entirely.
+        .overlay {
+            if isBloomOpen {
+                NavigationBloom(
+                    items: AppSection.secondary,
+                    current: presented ?? selection,
+                    onPick: { section in
+                        closeBloom()
+                        show(section)
+                    },
+                    onDismiss: closeBloom)
+                .transition(.opacity)
             }
         }
-        .tint(Theme.Palette.accent)
+        // Above the fan, deliberately. The orb has to stay lit over its own
+        // scrim: it is the thing the fan came out of, it is now an ✕, and it is
+        // where the thumb already is.
+        .overlay(alignment: .bottom) {
+            OrbNavigationDock(
+                tabs: AppSection.primary,
+                selection: selection,
+                isBloomOpen: isBloomOpen,
+                onSelect: { section in
+                    if isBloomOpen { closeBloom() }
+                    show(section)
+                },
+                onOrbTap: { withAnimation(Theme.Motion.standard) { isBloomOpen.toggle() } })
+            .tutorialAnchor(.navigationDock)
+        }
         .environmentObject(tutorial)
     }
 
@@ -339,16 +407,12 @@ struct RootView: View {
             .accessibilityLabel("Settings")
         }
 
+        // Every other section now lives on the orb, so this menu is down to the
+        // things that are not sections at all. It stays a menu rather than
+        // becoming a bare button because more will land in it, and a control
+        // that changes shape between builds is a control people stop trusting.
         ToolbarItem(placement: .topBarTrailing) {
             Menu {
-                ForEach(AppSection.secondary) { item in
-                    Button {
-                        show(item)
-                    } label: {
-                        Label(item.title, systemImage: item.systemImage)
-                    }
-                }
-                Divider()
                 Button {
                     env.isPresentationMode.toggle()
                 } label: {
@@ -358,7 +422,6 @@ struct RootView: View {
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
-            .tutorialAnchor(.moreMenu)
         }
     }
 
@@ -379,6 +442,8 @@ struct RootView: View {
         case .shakeTable: ShakeTableScreen()
         case .analysis: AnalysisScreen()
         case .settings: SettingsScreen()
+        case .device: DeviceControlScreen(link: env.link)
+        case .channels: SensorChannelsScreen(link: env.link)
         }
     }
 }

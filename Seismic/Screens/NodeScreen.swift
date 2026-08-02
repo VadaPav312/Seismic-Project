@@ -13,6 +13,7 @@ struct NodeScreen: View {
         ScrollView {
             VStack(spacing: Theme.Metrics.spacingLoose) {
                 connection
+                sensorQuality
                 actuatorConsole
                 powerBudget
                 sensors
@@ -56,6 +57,8 @@ struct NodeScreen: View {
                 }
             }
 
+            sourcePicker
+
             HStack(spacing: Theme.Metrics.spacing) {
                 Button {
                     showingScanner = true
@@ -80,6 +83,168 @@ struct NodeScreen: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .instrumentPanel()
+    }
+
+    // MARK: Where the motion comes from
+
+    /// The three sources, in the order they deserve.
+    ///
+    /// A node first, because it is genuinely the best one and the app should
+    /// say so rather than treat all three as equivalent choices. The note under
+    /// each is the real difference, not a feature list — somebody picking the
+    /// phone should know exactly what they are giving up before the first
+    /// verdict rather than after it.
+    private var sourcePicker: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.spacingTight) {
+            Text("WHERE THE MOTION COMES FROM")
+                .font(Theme.Typography.label)
+                .tracking(1.1)
+                .foregroundStyle(Theme.Palette.textTertiary)
+
+            ForEach(AppEnvironment.SensorSource.allCases) { source in
+                sourceRow(source)
+            }
+        }
+        .padding(.top, Theme.Metrics.spacingTight)
+    }
+
+    private func sourceRow(_ source: AppEnvironment.SensorSource) -> some View {
+        let isActive = env.sensorSource == source
+        let isAvailable = source != .phone || PhoneSensorTransport.isAvailable
+        return Button {
+            switch source {
+            case .node: showingScanner = true
+            case .phone: env.attachPhoneSensor()
+            case .simulated: env.attachSimulatedNode()
+            }
+            Haptics.shared.play(.selection)
+        } label: {
+            HStack(alignment: .top, spacing: Theme.Metrics.spacing) {
+                Image(systemName: isActive ? "largecircle.fill.circle" : "circle")
+                    .font(.system(size: 18))
+                    .foregroundStyle(isActive ? Theme.Palette.accent : Theme.Palette.textGhost)
+                    .padding(.top, 1)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 6) {
+                        Label(source.title, systemImage: source.systemImage)
+                            .font(Theme.Typography.headline)
+                            .foregroundStyle(Theme.Palette.textPrimary)
+                        if source == .node {
+                            Text("MOST ACCURATE")
+                                .font(.system(size: 9, weight: .bold))
+                                .tracking(0.6)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Theme.Palette.accentDim,
+                                            in: Capsule(style: .continuous))
+                                .foregroundStyle(Theme.Palette.accent)
+                        }
+                    }
+                    Text(isAvailable ? source.accuracyNote
+                                     : "This device has no motion sensor available to the app.")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.vertical, Theme.Metrics.spacingTight)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isAvailable)
+        .opacity(isAvailable ? 1 : 0.45)
+    }
+
+    // MARK: Sensor quality
+
+    /// Whether this sensor can actually resolve this building.
+    ///
+    /// The question only became askable when the app started offering a phone
+    /// as a sensor, and it is not rhetorical: a phone in a stiff two-storey
+    /// house is being asked to see a few micro-g of sway, which may genuinely
+    /// be below its own noise floor. Answering it with an opinion would be
+    /// worthless, so it is answered with an Allan deviation curve — the
+    /// standard way of separating a sensor's noise processes — and the floor of
+    /// that curve is compared against the building's expected amplitude.
+    ///
+    /// The comparison is what makes it useful. A noise floor on its own is a
+    /// number; a noise floor next to what the building actually does is a
+    /// verdict on whether to trust anything else on this screen.
+    private var sensorQuality: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+            SectionLabel("Sensor quality", systemImage: "gauge.with.dots.needle.bottom.50percent")
+
+            if let characterisation, let record = qualityRecord {
+                let expected = expectedAmplitude
+                let resolution = characterisation.canResolve(expected)
+
+                ReadoutGrid(readouts: [
+                    Readout(label: "Noise floor",
+                            value: String(format: "%.5f", characterisation.biasInstability),
+                            unit: "m/s²", size: .small),
+                    Readout(label: "Best averaged over",
+                            value: String(format: "%.1f", characterisation.optimalAveragingTime),
+                            unit: "s", size: .small),
+                    Readout(label: "Building's motion",
+                            value: String(format: "%.5f", expected),
+                            unit: "m/s²", size: .small),
+                    Readout(label: "Margin",
+                            value: resolution.margin > 999 ? "≫"
+                                 : String(format: "%.1f", resolution.margin),
+                            unit: "×",
+                            tint: resolution.verdict == .hopeless
+                                ? Theme.Palette.verdictAmber : Theme.Palette.accent,
+                            size: .small),
+                ], columns: 2)
+
+                InlineNotice(
+                    level: resolution.verdict == .hopeless ? .warning : .info,
+                    title: resolution.verdict.rawValue.capitalized,
+                    message: resolution.verdict.explanation)
+
+                Text("Allan deviation measures how much the average of the signal changes "
+                     + "between adjacent windows as the windows get longer. White noise falls "
+                     + "away as you average; drift does not, so the curve has a floor. That "
+                     + "floor is the best this sensor can ever do, and the time it occurs at "
+                     + "is how long a measurement is worth taking for. "
+                     + String(format: "Measured over %.0f s of buffered data.",
+                              record.duration))
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("Needs a few seconds of buffered data to characterise the sensor. This "
+                     + "fills in on its own.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .instrumentPanel()
+    }
+
+    /// The buffered record the characterisation is computed from.
+    private var qualityRecord: TriaxialRecord? {
+        guard let snapshot = node.snapshot, snapshot.recent.count > 2_000 else { return nil }
+        return snapshot.recent
+    }
+
+    private var characterisation: AllanVariance.Characterisation? {
+        guard let record = qualityRecord else { return nil }
+        return AllanVariance.compute(record.dominantHorizontal)
+    }
+
+    /// Roughly how hard the building shakes its own sensor at rest.
+    ///
+    /// Taken from the ambient RMS the node already reports rather than from a
+    /// model, because the whole point of the comparison is to test the sensor
+    /// against this building rather than against a typical one.
+    private var expectedAmplitude: Double {
+        node.snapshot?.telemetry.ambientVibrationRMS ?? 0
     }
 
     // MARK: Actuators

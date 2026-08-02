@@ -1,5 +1,8 @@
 import Foundation
 import SeismicCore
+#if canImport(FoundationModels)
+import FoundationModels
+#endif
 
 // MARK: - What the analyst is being asked to do
 
@@ -506,109 +509,353 @@ struct AnthropicMessagesResponse: Decodable {
 /// The answer when there is no key, no network, or no trustworthy model output.
 ///
 /// This is not a placeholder string. It reads the same evidence the model would
-/// have read and writes the same paragraph deterministically, so the app's
-/// default experience — which, with no keys configured, is *everyone's*
-/// experience — is a real explanation rather than an apology.
+/// have read and writes a real paragraph from it, so the app's default
+/// experience — which, with no keys configured, is *everyone's* experience — is
+/// an explanation rather than an apology.
+///
+/// **It does not say the same thing every time, and that is a safety property
+/// rather than a flourish.** The original wrote one fixed sentence per verdict.
+/// After the third event a reader stops reading it: the paragraph looks like
+/// the paragraph they already know, so the one time a clause changed — the one
+/// time it said the measurements disagreed — they would have skimmed straight
+/// past it. Text that always looks identical trains people not to look.
+///
+/// So the phrasing is drawn from pools, and two things are true of the draw:
+///
+/// * **The seed is the evidence.** It is derived from the facts themselves, so
+///   the same assessment always reads the same way — reopening a screen does
+///   not rewrite the paragraph under somebody, and a screenshot still matches
+///   the app. Two different assessments read differently.
+/// * **Only the frame varies, never the value.** Every number, unit and name is
+///   substituted verbatim from `AnalystFact`. The pools contain sentence
+///   scaffolding and nothing else, which is why the same grounding check that
+///   polices a remote model passes this unchanged.
 public enum OnDeviceNarrator {
 
     public static func narrate(_ request: AnalystRequest) -> String {
+        var rng = SeededRandom(seed: seed(for: request))
         switch request.task {
-        case .assessmentNarrative: assessment(request)
-        case .spokenGuidance: guidance(request)
-        case .buildingSummary: summary(request)
-        case .photoDamage: photo(request)
-        case .plainEnglish: plain(request)
+        case .assessmentNarrative: return assessment(request, &rng)
+        case .spokenGuidance: return guidance(request, &rng)
+        case .buildingSummary: return summary(request, &rng)
+        case .photoDamage: return photo(request, &rng)
+        case .plainEnglish: return plain(request, &rng)
         }
+    }
+
+    // MARK: Choosing
+
+    /// A seed derived from the request's content.
+    ///
+    /// Deliberately not `hashValue`: Swift seeds its hasher per process, so a
+    /// paragraph keyed on it would be rewritten on every launch — the exact
+    /// instability this is meant to avoid. FNV-1a over a canonical rendering is
+    /// stable across launches, devices and OS versions.
+    private static func seed(for request: AnalystRequest) -> UInt64 {
+        var canonical = request.task.rawValue + "|" + request.subject
+        for fact in request.facts { canonical += "|\(fact.label)=\(fact.value)" }
+        canonical += "|" + request.constraints.joined(separator: ";")
+
+        var hash: UInt64 = 0xcbf29ce484222325
+        for byte in canonical.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* 0x100000001b3
+        }
+        return hash
+    }
+
+    private static func pick(_ options: [String], _ rng: inout SeededRandom) -> String {
+        guard !options.isEmpty else { return "" }
+        return options[Int(rng.next() % UInt64(options.count))]
     }
 
     private static func value(_ request: AnalystRequest, _ label: String) -> String? {
         request.facts.first { $0.label.caseInsensitiveCompare(label) == .orderedSame }?.value
     }
 
-    private static func assessment(_ request: AnalystRequest) -> String {
+    /// Joins sentences and repairs the seams.
+    ///
+    /// Drawing independently from several pools occasionally lands two
+    /// sentences that open the same way, which reads as a stutter and is the
+    /// one artefact that makes generated text obvious. Cheaper to fix here than
+    /// to constrain every pool against every other.
+    private static func assemble(_ sentences: [String]) -> String {
+        var output: [String] = []
+        for sentence in sentences where !sentence.isEmpty {
+            if let previous = output.last, opening(of: previous) == opening(of: sentence) {
+                continue
+            }
+            output.append(sentence.hasSuffix(".") ? sentence : sentence + ".")
+        }
+        return output.joined(separator: " ")
+    }
+
+    private static func opening(of sentence: String) -> String {
+        sentence.split(separator: " ").prefix(2).joined(separator: " ").lowercased()
+    }
+
+    // MARK: Assessment
+
+    private static func assessment(_ request: AnalystRequest,
+                                   _ rng: inout SeededRandom) -> String {
         var sentences: [String] = []
 
-        let verdict = request.constraints.first ?? "The verdict is inconclusive."
-        sentences.append(verdict.hasSuffix(".") ? verdict : verdict + ".")
+        let verdict = request.constraints.first ?? "The verdict is inconclusive"
+        sentences.append(verdict)
 
         if let before = value(request, "Period before"),
            let after = value(request, "Period after temperature correction")
                     ?? value(request, "Period after") {
-            sentences.append("The building's natural period was measured at \(before) "
-                             + "before the event and \(after) after it, once the seasonal "
-                             + "temperature effect had been removed.")
+            sentences.append(pick([
+                "The building's natural period was \(before) before the event and \(after) "
+                    + "after it, once the seasonal temperature effect had been removed",
+                "Measured before the shaking, the period was \(before); measured after, and "
+                    + "corrected for temperature, it was \(after)",
+                "The rhythm the building sways at went from \(before) to \(after), with the "
+                    + "temperature effect already taken out",
+                "Period before: \(before). Period after, temperature-corrected: \(after)",
+            ], &rng))
         }
 
         if let residual = value(request, "Residual displacement") {
-            sentences.append("It came to rest \(residual) from where it started, which "
-                             + "temperature cannot explain.")
+            sentences.append(pick([
+                "It came to rest \(residual) from where it started, which temperature "
+                    + "cannot explain",
+                "The building settled \(residual) away from its original position — and "
+                    + "unlike the period, nothing seasonal accounts for that",
+                "A residual offset of \(residual) remains, which is a mechanical change "
+                    + "rather than a thermal one",
+            ], &rng))
         }
+
         if let tilt = value(request, "Permanent tilt") {
-            sentences.append("A permanent tilt of \(tilt) remains.")
+            sentences.append(pick([
+                "A permanent tilt of \(tilt) remains",
+                "The structure is now leaning by \(tilt) and has not returned",
+                "Tilt of \(tilt) persisted after the shaking stopped",
+            ], &rng))
         }
+
         if let drift = value(request, "Peak storey drift") {
-            sentences.append("The worst storey drift reached \(drift).")
+            sentences.append(pick([
+                "The worst storey drift reached \(drift)",
+                "At its peak, one storey moved \(drift) relative to the one below it",
+                "Peak drift between adjacent floors was \(drift)",
+            ], &rng))
         }
 
         if request.facts.count < 3 {
-            sentences.append("Few measurements were available, so this reading is weaker "
-                             + "than it would be after a fully recorded event.")
+            sentences.append(pick([
+                "Few measurements were available, so this reading is weaker than it would "
+                    + "be after a fully recorded event",
+                "This rests on very little data. A fully recorded event would support a "
+                    + "firmer conclusion than this one does",
+                "There is not much evidence here, and the conclusion is only as strong as "
+                    + "the evidence under it",
+            ], &rng))
         }
-        sentences.append("This is a screening measurement, not an inspection. "
-                         + "It narrows down where a qualified engineer should look first.")
-        return sentences.joined(separator: " ")
+
+        sentences.append(pick([
+            "This is a screening measurement, not an inspection. It narrows down where a "
+                + "qualified engineer should look first",
+            "None of this replaces an inspection. What it does is tell an engineer where "
+                + "to start",
+            "Treat this as a triage result rather than a verdict on the structure. A "
+                + "qualified engineer still has to look",
+        ], &rng))
+
+        return assemble(sentences)
     }
 
-    private static func guidance(_ request: AnalystRequest) -> String {
+    // MARK: Spoken guidance
+
+    /// Spoken aloud, and therefore the one place variation is kept on a short
+    /// leash. The instruction itself never changes — "stay outside" is always
+    /// "stay outside" — only the sentence that follows it.
+    private static func guidance(_ request: AnalystRequest,
+                                 _ rng: inout SeededRandom) -> String {
         let verdict = (request.constraints.first ?? "").lowercased()
+
         if verdict.contains("do not enter") || verdict.contains("red") {
-            return "Stay outside. Do not go back in until an engineer has looked at the building."
+            return "Stay outside. " + pick([
+                "Do not go back in until an engineer has looked at the building.",
+                "Nobody goes back in until this building has been inspected.",
+                "The building needs an engineer before anyone re-enters.",
+            ], &rng)
         }
         if verdict.contains("limited use") || verdict.contains("amber") {
-            return "Go in only if you have to, and only briefly. Arrange an inspection today."
+            return pick([
+                "Go in only if you have to, and only briefly. Arrange an inspection today.",
+                "Brief trips inside only. Get an inspection booked today.",
+                "Limit time indoors to what is necessary, and have it inspected today.",
+            ], &rng)
         }
         if verdict.contains("appears safe") || verdict.contains("green") {
-            return "Nothing structural changed. Check for gas, water and broken glass before settling back in."
+            return pick([
+                "Nothing structural changed. Check for gas, water and broken glass before "
+                    + "settling back in.",
+                "No structural change was measured. Still check for gas, water and broken "
+                    + "glass first.",
+                "The structure reads as unchanged. Look for gas, water and broken glass "
+                    + "before you settle.",
+            ], &rng)
         }
         return "Drop, cover and hold on. Stay where you are until the shaking stops."
     }
 
-    private static func summary(_ request: AnalystRequest) -> String {
+    // MARK: Building summary
+
+    private static func summary(_ request: AnalystRequest,
+                                _ rng: inout SeededRandom) -> String {
         var parts: [String] = []
         let material = value(request, "Material") ?? "an unrecorded material"
         let system = value(request, "Structural system") ?? "an unrecorded lateral system"
         let storeys = value(request, "Storeys") ?? "an unrecorded number of"
-        parts.append("\(request.subject) is a \(storeys)-storey building in \(material), "
-                     + "resisting lateral load through \(system).")
+
+        parts.append(pick([
+            "\(request.subject) is a \(storeys)-storey building in \(material), resisting "
+                + "lateral load through \(system)",
+            "\(request.subject) rises \(storeys) storeys, is built in \(material), and "
+                + "takes its lateral load through \(system)",
+            "\(storeys) storeys of \(material), with \(system) carrying the lateral load — "
+                + "that is \(request.subject)",
+        ], &rng))
+
         if let period = value(request, "Estimated period") {
-            parts.append("Its estimated natural period is \(period), so it responds most "
-                         + "strongly to ground motion arriving at about that rhythm.")
+            parts.append(pick([
+                "Its estimated natural period is \(period), so it responds most strongly to "
+                    + "ground motion arriving at about that rhythm",
+                "It sways naturally at about \(period), and ground motion at that rhythm is "
+                    + "what it responds to most",
+                "Estimated period \(period): shaking that arrives at roughly that beat is "
+                    + "what this building feels hardest",
+            ], &rng))
         }
+
         if let soil = value(request, "Soil class") {
-            parts.append("It sits on \(soil), which shapes how much of the incoming motion "
-                         + "reaches the foundation.")
+            parts.append(pick([
+                "It sits on \(soil), which shapes how much of the incoming motion reaches "
+                    + "the foundation",
+                "The ground beneath it is \(soil), and that governs how much of the motion "
+                    + "arrives at the foundation in the first place",
+                "Founded on \(soil) — the soil decides how much shaking gets through",
+            ], &rng))
         }
+
         if let retrofit = value(request, "Retrofit"), retrofit.lowercased() != "none" {
-            parts.append("A \(retrofit) retrofit has been recorded, which stiffens the frame "
-                         + "and shortens the period.")
+            parts.append(pick([
+                "A \(retrofit) retrofit has been recorded, which stiffens the frame and "
+                    + "shortens the period",
+                "It has had a \(retrofit) retrofit; that stiffening is why the period is "
+                    + "shorter than the bare frame would give",
+            ], &rng))
         }
-        parts.append("Figures not marked as confirmed are estimates from the building's "
-                     + "geometry and should be treated as such.")
-        return parts.joined(separator: " ")
+
+        parts.append(pick([
+            "Figures not marked as confirmed are estimates from the building's geometry and "
+                + "should be treated as such",
+            "Anything not marked confirmed was estimated from geometry, not measured",
+            "Where a figure is not marked confirmed, it came from the shape of the building "
+                + "rather than from an instrument",
+        ], &rng))
+
+        return assemble(parts)
     }
 
-    private static func photo(_ request: AnalystRequest) -> String {
-        "Photograph stored and timestamped against this building. Automatic description "
-        + "needs a vision model, which is not configured, so the image has been kept for "
-        + "side-by-side comparison instead: take the same shot from the same place after "
-        + "the next event and the two will be shown together. A crack that has widened "
-        + "between two photographs is worth far more than any single description of one."
+    // MARK: The rest
+
+    private static func photo(_ request: AnalystRequest, _ rng: inout SeededRandom) -> String {
+        pick([
+            "Photograph stored and timestamped against this building. Automatic description "
+                + "needs a vision model, which is not configured, so the image has been kept "
+                + "for side-by-side comparison instead: take the same shot from the same "
+                + "place after the next event and the two will be shown together. A crack "
+                + "that has widened between two photographs is worth far more than any "
+                + "single description of one.",
+            "Stored and timestamped. There is no vision model configured to describe it, so "
+                + "this photograph is being kept for comparison rather than captioned. Take "
+                + "the same shot from the same spot after the next event: what matters is "
+                + "whether a crack moved, and no description of a single photograph can "
+                + "tell you that.",
+        ], &rng)
     }
 
-    private static func plain(_ request: AnalystRequest) -> String {
-        "\(request.subject): \(request.question) "
-        + "A full explanation needs an inference key, which is not configured. "
-        + "The glossary in this app covers every term used on screen."
+    private static func plain(_ request: AnalystRequest, _ rng: inout SeededRandom) -> String {
+        "\(request.subject): \(request.question) " + pick([
+            "A full explanation needs an inference key, which is not configured. The "
+                + "glossary in this app covers every term used on screen.",
+            "Answering this properly needs an inference key, and none is set. Every term "
+                + "used on screen is defined in the glossary.",
+        ], &rng)
+    }
+}
+
+// MARK: - Apple's on-device model
+
+/// The model that is already on the phone.
+///
+/// Tried before any of the keyed providers, and it should be: it needs no key,
+/// costs nothing, works with the aeroplane in flight mode, and — the part that
+/// matters here — the building's measurements never leave the device. An
+/// earthquake app whose explanation of your home requires uploading its
+/// structural condition to a third party has a problem the free tier does not
+/// solve.
+///
+/// It is held to exactly the same standard as everything else. The output goes
+/// through `GroundingCheck` unchanged, and a number the model invented gets the
+/// answer thrown away and the narrator substituted, with the substitution shown
+/// on screen. Being local buys privacy and latency; it buys no trust.
+enum AppleOnDeviceModel {
+
+    /// Why the on-device path is not being used, in words a user could act on.
+    /// Nil when it is available.
+    static var unavailableReason: String? {
+        #if canImport(FoundationModels)
+        if #available(iOS 26.0, macOS 26.0, *) {
+            switch SystemLanguageModel.default.availability {
+            case .available:
+                return nil
+            case .unavailable(.deviceNotEligible):
+                return "This device does not support Apple Intelligence."
+            case .unavailable(.appleIntelligenceNotEnabled):
+                return "Apple Intelligence is switched off in Settings."
+            case .unavailable(.modelNotReady):
+                return "Apple Intelligence is still downloading its model."
+            @unknown default:
+                return "Apple Intelligence is unavailable."
+            }
+        }
+        return "Apple Intelligence needs iOS 26."
+        #else
+        return "This build has no on-device model."
+        #endif
+    }
+
+    static var isAvailable: Bool { unavailableReason == nil }
+
+    /// Returns the model's answer, or nil if it could not produce one.
+    ///
+    /// Nil rather than throwing: a missing on-device model is not an error
+    /// condition, it is the ordinary state of most devices, and the caller's
+    /// only reasonable response is to try the next provider.
+    static func complete(system: String, user: String, task: AnalystTask) async -> String? {
+        #if canImport(FoundationModels)
+        guard #available(iOS 26.0, macOS 26.0, *), isAvailable else { return nil }
+        do {
+            let session = LanguageModelSession(instructions: system)
+            // Low temperature on purpose. This is not creative writing — the
+            // paragraph is a restatement of measurements, and a model given
+            // room to be interesting here is a model given room to embellish.
+            let options = GenerationOptions(temperature: 0.4)
+            let response = try await session.respond(to: user, options: options)
+            let text = response.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            return text.isEmpty ? nil : text
+        } catch {
+            return nil
+        }
+        #else
+        return nil
+        #endif
     }
 }
 
@@ -635,12 +882,30 @@ public actor AIAnalyst {
 
     /// The providers that could be tried right now, in order. Surfaced in
     /// Settings so the user can see which key is actually doing the work.
+    /// In the order they will actually be tried, which is why Apple's model is
+    /// last: a key the user added on purpose outranks the one that came with
+    /// the phone.
     public func availableProviders() -> [String] {
-        providers.filter { vault.has($0.key) }.map(\.name)
+        let keyed = providers.filter { vault.has($0.key) }.map(\.name)
+        return AppleOnDeviceModel.isAvailable ? keyed + ["Apple Intelligence"] : keyed
     }
 
     public var hasAnyProvider: Bool {
+        AppleOnDeviceModel.isAvailable || hasKeyedProvider
+    }
+
+    /// Whether any provider needing a key is configured. Distinct from
+    /// `hasAnyProvider` because "you have added no keys" and "nothing answered"
+    /// are different things to tell somebody.
+    public var hasKeyedProvider: Bool {
         providers.contains { vault.has($0.key) }
+    }
+
+    /// Why the on-device model is not in use, or nil when it is. Shown in
+    /// Settings beside the key list, because "no key configured" and "Apple
+    /// Intelligence is switched off" send a user to two different places.
+    public var onDeviceModelUnavailableReason: String? {
+        AppleOnDeviceModel.unavailableReason
     }
 
     public func answer(_ request: AnalystRequest) async -> Sourced<AnalystAnswer> {
@@ -683,12 +948,44 @@ public actor AIAnalyst {
             }
         }
 
+        // Apple's on-device model, after the keyed providers and before the
+        // written fallback.
+        //
+        // The ordering is the whole argument. Ahead of the keyed providers it
+        // would quietly overrule somebody who had gone to the trouble of adding
+        // a key to a stronger model — their explicit choice, silently
+        // discarded. Behind them, it is what actually happens for the large
+        // majority of users, who have configured nothing: a real model,
+        // running on the phone, for free, with the building's measurements
+        // never leaving the device, in place of a paragraph assembled from
+        // templates.
+        if let raw = await AppleOnDeviceModel.complete(system: system, user: user,
+                                                       task: request.task) {
+            let text = Self.tidy(raw)
+            if GroundingCheck.passes(text, given: request) {
+                let answer = AnalystAnswer(text: text, provider: "Apple Intelligence",
+                                           isAIGenerated: true)
+                cache.setValue(answer, forKey: cacheKey)
+                return Sourced(answer, origin: .onDevice, provider: "Apple Intelligence",
+                               note: "Answered on this device. Nothing was sent anywhere.")
+            }
+            // It invented a figure. Exactly the same consequence a remote model
+            // gets — being local earns privacy and latency, not leniency.
+            let fallback = AnalystAnswer(text: OnDeviceNarrator.narrate(request),
+                                         provider: "On device", isAIGenerated: false,
+                                         wasSubstituted: true)
+            cache.setValue(fallback, forKey: cacheKey)
+            return Sourced(fallback, origin: .onDevice, provider: "Apple Intelligence",
+                           note: "The on-device model's answer contained a figure that was "
+                               + "never measured, so it was not used.")
+        }
+
         let answer = AnalystAnswer(text: OnDeviceNarrator.narrate(request),
                                    provider: "On device", isAIGenerated: false)
         cache.setValue(answer, forKey: cacheKey)
         return Sourced(answer, origin: .onDevice, provider: "On device",
-                       note: hasAnyProvider ? "No inference provider answered."
-                                            : "No inference key is configured.")
+                       note: hasKeyedProvider ? "No inference provider answered."
+                                              : "No inference key is configured.")
     }
 
     /// Describes a photograph of possible damage.

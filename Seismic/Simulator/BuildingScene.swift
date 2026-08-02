@@ -3,6 +3,7 @@ import SceneKit
 import SeismicCore
 import SeismicStructures
 import SeismicGeo
+import SeismicServices
 
 /// The 3D building twin.
 ///
@@ -45,6 +46,13 @@ final class BuildingSceneController: ObservableObject {
     private var buildingRoot = SCNNode()
     private var groundNode: SCNNode?
     private var cameraNode = SCNNode()
+
+    /// The street around the building. Kept apart from `buildingRoot` because
+    /// nothing that happens to these is a result — they are scenery that sways,
+    /// not structures under assessment, and they must never be picked up by
+    /// anything that walks the storey nodes looking for drift.
+    private var streetRoot = SCNNode()
+    private var neighbourNodes: [(node: SCNNode, period: Double, height: Double)] = []
 
     private(set) var building: BuildingModel?
     private(set) var model: ShearBuilding?
@@ -167,6 +175,161 @@ final class BuildingSceneController: ObservableObject {
         scene.rootNode.addChildNode(cameraNode)
 
         scene.rootNode.addChildNode(buildingRoot)
+        scene.rootNode.addChildNode(streetRoot)
+    }
+
+    // MARK: The street
+
+    /// Stands the neighbours up around the building.
+    ///
+    /// They are drawn as plain extrusions with no storeys, no damage states and
+    /// no drift colouring, and that restraint is the point. The eye has to be
+    /// able to tell in one glance which building in the scene is the one being
+    /// assessed — so exactly one of them is detailed, coloured and instrumented,
+    /// and everything else is grey massing. A street of equally rendered
+    /// buildings would be prettier and would answer no question at all.
+    func setStreet(_ neighbours: [BlockBuilding]) {
+        streetRoot.childNodes.forEach { $0.removeFromParentNode() }
+        neighbourNodes.removeAll()
+        guard !neighbours.isEmpty else { return }
+
+        for neighbour in neighbours {
+            let (height, isMeasured) = neighbour.estimatedHeight
+            guard height > 1, neighbour.ring.count >= 3 else { continue }
+
+            let centred = neighbour.ring.map {
+                Coordinate2D(x: $0.x - neighbour.centre.x, y: $0.y - neighbour.centre.y)
+            }
+            guard let shape = Self.path(from: centred) else { continue }
+
+            let solid = SCNShape(path: shape, extrusionDepth: CGFloat(height))
+            solid.chamferRadius = 0.15
+
+            let material = SCNMaterial()
+            // Buildings whose height was mapped are drawn solid; ones where it
+            // was assumed are drawn faintly, so a skyline that is partly
+            // invented looks partly invented.
+            material.diffuse.contents = UIColor(white: isMeasured ? 0.30 : 0.22,
+                                                alpha: isMeasured ? 1.0 : 0.72)
+            material.roughness.contents = 0.9
+            material.metalness.contents = 0.0
+            solid.firstMaterial = material
+
+            // SCNShape extrudes along Z, so the whole thing is laid down flat
+            // and then the extrusion becomes the vertical axis.
+            let pivot = SCNNode(geometry: solid)
+            pivot.eulerAngles = SCNVector3(-Float.pi / 2, 0, 0)
+            pivot.position = SCNVector3(0, Float(height / 2), 0)
+
+            // A sway pivot at ground level, so the block leans from its base the
+            // way the assessed building does rather than sliding sideways.
+            let base = SCNNode()
+            base.addChildNode(pivot)
+            base.position = SCNVector3(Float(neighbour.centre.x), 0,
+                                       Float(-neighbour.centre.y))
+            streetRoot.addChildNode(base)
+            neighbourNodes.append((node: base, period: neighbour.approximatePeriod,
+                                   height: height))
+        }
+    }
+
+    var hasStreet: Bool { !neighbourNodes.isEmpty }
+
+    // MARK: Photographed damage
+
+    /// Marks the storeys somebody has photographed damage on.
+    ///
+    /// The point of putting these on the model rather than in a list is that a
+    /// list of "storey 2, storey 2, storey 3, storey 7" tells you nothing,
+    /// whereas three pins clustered at the base of a building whose first mode
+    /// bends hardest at the base is an argument you can see in one glance —
+    /// and one pin near the roof of the same building is a question.
+    ///
+    /// They ride on the storey nodes, so they lean with the building as it
+    /// sways rather than hanging in the air beside it.
+    func markPhotographedStoreys(_ storeys: Set<Int>) {
+        for node in storeyNodes {
+            node.childNodes
+                .filter { $0.name == Self.damagePinName }
+                .forEach { $0.removeFromParentNode() }
+        }
+        guard !storeys.isEmpty else { return }
+
+        for storey in storeys {
+            let index = storey - 1
+            guard storeyNodes.indices.contains(index) else { continue }
+
+            let marker = SCNNode(geometry: SCNSphere(radius: 0.55))
+            marker.name = Self.damagePinName
+            let material = SCNMaterial()
+            material.diffuse.contents = UIColor(Theme.Palette.accentSecondary)
+            material.emission.contents = UIColor(Theme.Palette.accentSecondary
+                                                     .opacity(0.55))
+            material.lightingModel = .constant
+            marker.geometry?.firstMaterial = material
+
+            // On the outside of the storey, on the corner facing the default
+            // camera, so it is not swallowed by the massing.
+            let extents = Polygon.boundingBoxSize(footprint)
+            marker.position = SCNVector3(Float(extents.width / 2), 0,
+                                         Float(extents.depth / 2))
+            storeyNodes[index].addChildNode(marker)
+        }
+    }
+
+    private static let damagePinName = "damage-pin"
+
+    func clearStreet() {
+        streetRoot.childNodes.forEach { $0.removeFromParentNode() }
+        neighbourNodes.removeAll()
+    }
+
+    /// Sways the neighbours for one frame of the simulation.
+    ///
+    /// Each leans by a single-degree-of-freedom response to the same ground
+    /// displacement, at its own period. That is a far cruder model than the
+    /// solver runs for the assessed building, and it has to be — nothing is
+    /// known about these beyond an outline and a storey count, so a stiffness
+    /// matrix for them would be arithmetic performed on invented numbers.
+    ///
+    /// What it gets right is the thing the picture is for: buildings near the
+    /// ground motion's dominant period move a great deal, and their neighbours
+    /// two storeys shorter barely move at all. That is resonance, it is the
+    /// single most counter-intuitive fact in earthquake engineering, and a
+    /// street shows it in one frame where a chart takes a paragraph.
+    func swayStreet(groundDisplacement: Double, dominantPeriod: Double) {
+        guard !neighbourNodes.isEmpty else { return }
+        for entry in neighbourNodes {
+            // Amplification from the classic SDOF steady-state expression at 5%
+            // damping. Peaks when the building's period matches the shaking.
+            let ratio = dominantPeriod > 0 ? entry.period / dominantPeriod : 0
+            let damping = 0.05
+            let denominator = pow(1 - ratio * ratio, 2) + pow(2 * damping * ratio, 2)
+            let amplification = denominator > 1e-6 ? 1 / denominator.squareRoot() : 1
+            let tipMetres = groundDisplacement * min(amplification, 6)
+                          * displacementExaggeration
+            // Converted to a lean about the base, capped so a resonant block
+            // does not fold over into its neighbour.
+            let angle = atan2(tipMetres, entry.height)
+            entry.node.eulerAngles = SCNVector3(0, 0, Float(min(max(angle, -0.22), 0.22)))
+        }
+    }
+
+    func resetStreet() {
+        for entry in neighbourNodes { entry.node.eulerAngles = SCNVector3Zero }
+    }
+
+    /// A closed path from a ring of local metres.
+    private static func path(from ring: [Coordinate2D]) -> UIBezierPath? {
+        guard let first = ring.first, ring.count >= 3 else { return nil }
+        let path = UIBezierPath()
+        path.move(to: CGPoint(x: first.x, y: first.y))
+        for point in ring.dropFirst() {
+            path.addLine(to: CGPoint(x: point.x, y: point.y))
+        }
+        path.close()
+        path.flatness = 0.2
+        return path
     }
 
     // MARK: Building the geometry

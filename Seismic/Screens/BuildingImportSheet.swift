@@ -21,6 +21,10 @@ struct BuildingImportSheet: View {
     @StateObject private var importer = BuildingImporter()
     @State private var query = ""
     @StateObject private var controller = BuildingSceneController()
+    /// Whether to pull the neighbouring buildings in too. On by default: the
+    /// data is already in the response, it costs nothing extra, and a building
+    /// standing among its neighbours is far more informative than one alone.
+    @State private var bringsTheStreet = true
 
     var body: some View {
         NavigationStack {
@@ -212,11 +216,44 @@ struct BuildingImportSheet: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .instrumentPanel()
 
+            // Bringing the street in with it.
+            //
+            // The Overpass query that found this building already returned
+            // every outline within sixty metres and then discarded all but one.
+            // Keeping them costs no extra request, and it is what lets the
+            // simulator show this building among its neighbours rather than
+            // alone on a black background. The neighbours are never added to
+            // the library — they are scenery, with no baseline and no verdict —
+            // so this is not nineteen more buildings to manage.
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle(isOn: $bringsTheStreet) {
+                    Label("Bring the street with it", systemImage: "building.2.crop.circle")
+                        .font(Theme.Typography.callout)
+                }
+                .tint(Theme.Palette.accent)
+
+                Text("Fetches the neighbouring buildings from OpenStreetMap so the simulator "
+                     + "can shake the whole block at once. They are drawn as context only — "
+                     + "no baselines, no verdicts, nothing added to your library.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .instrumentPanel()
+
             Button {
                 env.store.upsert(building)
                 env.refresh()
                 env.selectedBuildingID = building.id
                 Haptics.shared.play(.assessmentComplete)
+                if bringsTheStreet {
+                    // Deliberately not awaited. The building is already saved
+                    // and usable; its neighbours arriving a second later is not
+                    // worth holding the sheet open for, and a failed fetch must
+                    // not be able to make an import look like it failed.
+                    Task { await env.block.fetch(for: building, using: services) }
+                }
                 dismiss()
             } label: {
                 Label("Add to my library", systemImage: "plus.circle")

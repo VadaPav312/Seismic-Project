@@ -19,7 +19,8 @@ struct AnalysisScreen: View {
     @State private var recordSource: RecordSource = .ambient
     @State private var window: Window = .hann
     @State private var smoothingBandwidth: Double = 40
-    @State private var isSmoothed = true
+    @State private var estimator: Estimator = .welch
+    @State private var smoother: Smoother = .konnoOhmachi
     @State private var analysis: Analysis?
     @State private var isWorking = false
     @State private var anomalyModel: AnomalyDetection.Model?
@@ -57,6 +58,62 @@ struct AnalysisScreen: View {
         let y: Double
     }
 
+    /// How the spectrum is estimated.
+    enum Estimator: String, CaseIterable, Identifiable {
+        case welch, multitaper
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .welch: "Welch"
+            case .multitaper: "Multitaper"
+            }
+        }
+
+        var explanation: String {
+            switch self {
+            case .welch:
+                "Cuts the record into overlapping segments and averages them. Smoother, at "
+                + "the cost of resolving frequencies that are close together — eight "
+                + "segments means eight times the smoothing and eight times the blur."
+            case .multitaper:
+                "Several orthogonal tapers over the *whole* record instead. Each taper is a "
+                + "nearly independent estimate, so averaging them smooths without ever "
+                + "shortening the record — which is what keeps a two per cent period shift "
+                + "resolvable."
+            }
+        }
+    }
+
+    /// How the spectrum is smoothed afterwards.
+    enum Smoother: String, CaseIterable, Identifiable {
+        case none, konnoOhmachi, savitzkyGolay
+        var id: String { rawValue }
+
+        var label: String {
+            switch self {
+            case .none: "None"
+            case .konnoOhmachi: "Konno-Ohmachi"
+            case .savitzkyGolay: "Savitzky-Golay"
+            }
+        }
+
+        var explanation: String {
+            switch self {
+            case .none:
+                "The raw estimate. Noisier, and the only one that has definitely not had a "
+                + "peak reshaped by the smoothing."
+            case .konnoOhmachi:
+                "Constant width on a log axis, so a peak at 8 Hz is smoothed as much as one "
+                + "at 1 Hz — which linear smoothing gets wrong."
+            case .savitzkyGolay:
+                "Fits a cubic to a sliding window instead of averaging it. A cubic can "
+                + "follow a peak, so the peak keeps its height and width — which matters "
+                + "because width is what damping is read from."
+            }
+        }
+    }
+
     /// Everything computed in one pass, off the main thread.
     struct Analysis {
         var spectrum: PowerSpectrum
@@ -72,6 +129,26 @@ struct AnalysisScreen: View {
         var energy: EnergyMeasures
         var trigger: TriggerResult
         var falseTrigger: FalseTriggerRejection.Verdict
+
+        // Operational modal analysis — several modes at once, from ambient
+        // motion, with an honest account of which of them are real.
+        var decomposition: FrequencyDomainDecomposition.Result?
+        var poles: [PronyAnalysis.Pole]
+        var stablePoles: [StabilisationDiagram.StablePole]
+
+        /// The F statistic per bin, for telling a mains harmonic from a mode.
+        var lineTest: [Double]
+        /// Intrinsic mode functions, fastest first, with their frequencies.
+        var intrinsicModes: [(frequency: Double, energy: Double)]
+        /// The building's period through the record, from the wavelet ridge.
+        var ridge: WaveletRidge.Result?
+        /// Displacement recovered with the sensor pinned still at both ends.
+        var displacement: ConstrainedDisplacement.Result?
+        /// Aftershocks found by correlating the record against its own onset.
+        var aftershocks: [MatchedFilter.Detection]
+        /// The kurtosis onset pick, and how it compares with the AIC pick.
+        var kurtosisPick: KurtosisPicker.Pick?
+        var pickComparison: (differenceSeconds: Double, interpretation: String)?
     }
 
     var body: some View {
@@ -86,14 +163,19 @@ struct AnalysisScreen: View {
                 } else if let analysis {
                     spectrumSection(analysis)
                     modesSection(analysis)
+                    operationalModalSection(analysis)
                     crossCheckSection(analysis)
                     dampingSection(analysis)
                     ambientSection(analysis)
+                    ridgeSection(analysis)
+                    intrinsicModesSection(analysis)
+                    displacementSection(analysis)
                     historySection
                     anomalySection
                     responseSpectrumSection(analysis)
                     spectrogramSection(analysis)
                     detectionSection(analysis)
+                    aftershockSection(analysis)
                 } else {
                     DesignedEmptyState(
                         icon: "waveform.and.magnifyingglass",
@@ -111,6 +193,8 @@ struct AnalysisScreen: View {
         .task(id: recordSource) { await compute() }
         .task(id: env.observations.count) { trainAnomalyModel() }
         .onChange(of: window) { _, _ in Task { await compute() } }
+        .onChange(of: estimator) { _, _ in Task { await compute() } }
+        .onChange(of: smoother) { _, _ in Task { await compute() } }
     }
 
     // MARK: Source
@@ -132,11 +216,11 @@ struct AnalysisScreen: View {
     // MARK: Spectrum
 
     private func spectrumSection(_ analysis: Analysis) -> some View {
-        let shown = isSmoothed ? analysis.smoothed : analysis.spectrum
+        let shown = analysis.smoothed
 
         return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
             SectionLabel("Spectrum", systemImage: "waveform.path",
-                         trailing: "Welch, \(window.label)")
+                         trailing: "\(estimator.label), \(window.label)")
 
             let points = Self.points(x: shown.frequencies, y: shown.power,
                                      keepingX: { $0 > 0.05 && $0 < 15 },
@@ -159,36 +243,97 @@ struct AnalysisScreen: View {
             .chartYAxisLabel("Power")
             .frame(height: 200)
 
-            // Smoothing is a control rather than a default, because the
-            // unsmoothed spectrum is noisier but honest, and a user should be
-            // able to see what the smoothing did.
-            Toggle(isOn: $isSmoothed) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Konno-Ohmachi smoothing")
-                        .font(Theme.Typography.callout)
-                        .foregroundStyle(Theme.Palette.textPrimary)
-                    Text("Constant width on a log axis, so a peak at 8 Hz is smoothed as much "
-                         + "as one at 1 Hz — which linear smoothing gets wrong.")
-                        .font(Theme.Typography.caption)
-                        .foregroundStyle(Theme.Palette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
+            // Every stage of the estimate is a control rather than a default,
+            // because each one reshapes the peak that a period is read off and
+            // a user is entitled to see what each did.
+            VStack(alignment: .leading, spacing: 6) {
+                Text("ESTIMATOR")
+                    .font(Theme.Typography.label)
+                    .tracking(1.1)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                Picker("Estimator", selection: $estimator) {
+                    ForEach(Estimator.allCases) { Text($0.label).tag($0) }
                 }
+                .pickerStyle(.segmented)
+                Text(estimator.explanation)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .tint(Theme.Palette.accent)
 
-            Picker("Window", selection: $window) {
-                ForEach(Window.allCases, id: \.self) { Text($0.label).tag($0) }
+            VStack(alignment: .leading, spacing: 6) {
+                Text("SMOOTHING")
+                    .font(Theme.Typography.label)
+                    .tracking(1.1)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                Picker("Smoothing", selection: $smoother) {
+                    ForEach(Smoother.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                Text(smoother.explanation)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
             }
-            .pickerStyle(.segmented)
 
-            Text("A window is applied before the transform because a finite record has hard "
-                 + "ends, and hard ends smear energy across every frequency.")
-                .font(Theme.Typography.caption)
-                .foregroundStyle(Theme.Palette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
+            if estimator == .welch {
+                Picker("Window", selection: $window) {
+                    ForEach(Window.allCases, id: \.self) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented)
+
+                Text("A window is applied before the transform because a finite record has "
+                     + "hard ends, and hard ends smear energy across every frequency.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            lineTestNotice(analysis)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .instrumentPanel()
+    }
+
+    /// Warns when a peak is a machine rather than a building.
+    ///
+    /// Only shown when it has something to say. A permanent panel reading "no
+    /// lines detected" is a panel people stop reading, and this is precisely
+    /// the warning that must be noticed the once it appears.
+    @ViewBuilder
+    private func lineTestNotice(_ analysis: Analysis) -> some View {
+        let lines = deterministicLines(analysis)
+        if !lines.isEmpty {
+            InlineNotice(
+                level: .warning,
+                title: lines.count == 1 ? "One peak is a machine, not the building"
+                                        : "\(lines.count) peaks are machines, not the building",
+                message: "Thomson's F-test says the "
+                    + lines.map { String(format: "%.2f Hz", $0) }.joined(separator: ", ")
+                    + " peak\(lines.count == 1 ? " is" : "s are") a pure sinusoid. A building's "
+                    + "resonance has width to it, because damping gives it width; a lift "
+                    + "motor, a transformer or a mains harmonic has none. Tracking one as a "
+                    + "mode would give a period that never changes — and never changing is "
+                    + "exactly what a healthy building is supposed to look like.")
+        }
+    }
+
+    /// Frequencies where the F-test fires and a peak was picked.
+    ///
+    /// Both conditions, deliberately: the F-test fires at plenty of bins that
+    /// nothing is being read off, and warning about those would be noise about
+    /// noise.
+    private func deterministicLines(_ analysis: Analysis) -> [Double] {
+        guard !analysis.lineTest.isEmpty else { return [] }
+        return analysis.peaks.prefix(6).compactMap { peak -> Double? in
+            let bin = Int((peak.frequency / max(analysis.spectrum.sampleRate, 1))
+                          * Double(analysis.lineTest.count) * 2)
+            guard bin > 0, bin < analysis.lineTest.count else { return nil }
+            // A little either side, because a line rarely sits on a bin centre.
+            let window = max(bin - 1, 0)...min(bin + 1, analysis.lineTest.count - 1)
+            let peakF = window.map { analysis.lineTest[$0] }.max() ?? 0
+            return peakF > 12 ? peak.frequency : nil
+        }
     }
 
     // MARK: Modes
@@ -236,6 +381,272 @@ struct AnalysisScreen: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .instrumentPanel()
+    }
+
+    // MARK: Operational modal analysis
+
+    /// Every mode at once, and which of them can be believed.
+    ///
+    /// The peak-picking section above answers "where are the bumps". This
+    /// answers the two questions that follow and that a spectrum cannot: is
+    /// each bump one mode or two, and is it a property of the building or of
+    /// the fit that found it.
+    private func operationalModalSection(_ analysis: Analysis) -> some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+            SectionLabel("Operational modal analysis", systemImage: "tuningfork",
+                         trailing: analysis.stablePoles.isEmpty
+                            ? nil : "\(analysis.stablePoles.count) stable")
+
+            if let decomposition = analysis.decomposition,
+               let first = analysis.peaks.first,
+               decomposition.hasClosePair(near: first.frequency) {
+                InlineNotice(
+                    level: .warning,
+                    title: "Two modes are sitting on top of each other",
+                    message: String(format: "Near %.2f Hz ", first.frequency)
+                        + "the second singular value is close to the first, which means two "
+                        + "modes are overlapping rather than one. A single-channel spectrum "
+                        + "cannot see that: it reports a period between the two, belonging to "
+                        + "neither, and reports it moving as they trade dominance. Read the "
+                        + "period history through this band with suspicion.")
+            }
+
+            if analysis.stablePoles.isEmpty {
+                Text("Not enough free decay to fit poles to yet. This needs a random "
+                     + "decrement signature, which builds up over a minute or two of ambient "
+                     + "recording.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                ForEach(analysis.stablePoles.prefix(4)) { pole in
+                    HStack(alignment: .firstTextBaseline, spacing: Theme.Metrics.spacing) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(String(format: "%.3f Hz · %.3f s",
+                                        pole.frequency, 1 / max(pole.frequency, 1e-6)))
+                                .font(Theme.Typography.numeric)
+                                .foregroundStyle(Theme.Palette.accent)
+                            Text(String(format: "damping %.2f%%  ·  survived %d model orders",
+                                        pole.damping * 100, pole.appearances))
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(Theme.Palette.textTertiary)
+                        }
+                        Spacer(minLength: 0)
+                        // The stability bar is the whole point of the section:
+                        // it is the difference between a mode and an artefact.
+                        ConfidenceBar(confidence: pole.stability)
+                            .frame(width: 74)
+                    }
+                }
+
+                Text("Each pole carries its own frequency *and* its own damping, from one "
+                     + "fit — so a change in the third mode is not hidden behind the first. "
+                     + "The bar is how many model orders the pole survived: a real mode is a "
+                     + "property of the building and keeps coming back, while a numerical one "
+                     + "moves every time the fit changes.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                if analysis.poles.count > analysis.stablePoles.count {
+                    Text("\(analysis.poles.count - analysis.stablePoles.count) further poles "
+                         + "were fitted and discarded for not surviving a change of model "
+                         + "order.")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .instrumentPanel()
+    }
+
+    // MARK: Intrinsic modes
+
+    /// What the record is made of, without assuming a basis first.
+    private func intrinsicModesSection(_ analysis: Analysis) -> some View {
+        let total = max(analysis.intrinsicModes.reduce(0) { $0 + $1.energy }, 1e-18)
+
+        return VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+            SectionLabel("Intrinsic modes", systemImage: "square.stack.3d.down.right",
+                         trailing: "\(analysis.intrinsicModes.count)")
+
+            if analysis.intrinsicModes.isEmpty {
+                Text("The record has too few turning points to decompose — which is what a "
+                     + "pure trend looks like, and there is nothing oscillating in it to "
+                     + "separate.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            ForEach(Array(analysis.intrinsicModes.enumerated()), id: \.offset) { index, mode in
+                HStack(alignment: .firstTextBaseline) {
+                    Text("IMF \(index + 1)")
+                        .font(Theme.Typography.callout.weight(.medium))
+                        .foregroundStyle(Theme.Palette.textPrimary)
+                        .frame(width: 62, alignment: .leading)
+                    Text(String(format: "%.2f Hz", mode.frequency))
+                        .font(Theme.Typography.numeric)
+                        .foregroundStyle(Theme.Palette.accent)
+                    Spacer()
+                    Text(String(format: "%.0f%% of energy", mode.energy / total * 100))
+                        .font(Theme.Typography.numericSmall)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                }
+            }
+
+            Text("Sifted out of the data's own turning points rather than fitted to "
+                 + "sinusoids. Everything else here assumes a basis before it looks — Fourier "
+                 + "assumes sine waves, wavelets assume scaled copies of one shape — and both "
+                 + "distort a signal whose frequency is moving. This assumes nothing, which "
+                 + "is what separates the building's sway from the traffic under it without "
+                 + "anybody saying in advance what frequency either is at.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .instrumentPanel()
+    }
+
+    // MARK: The period during the shaking
+
+    /// The measurement the whole product is about, taken *during* the event.
+    @ViewBuilder
+    private func ridgeSection(_ analysis: Analysis) -> some View {
+        if let ridge = analysis.ridge, ridge.times.count > 8 {
+            let threshold = (ridge.amplitudes.max() ?? 0) * 0.25
+            let points = ridge.times.indices.compactMap { i -> Point? in
+                guard ridge.amplitudes[i] >= threshold, ridge.frequencies[i] > 0 else {
+                    return nil
+                }
+                return Point(id: i, x: ridge.times[i], y: 1 / ridge.frequencies[i])
+            }
+
+            VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+                SectionLabel("Period during the shaking", systemImage: "waveform.path.ecg",
+                             trailing: ridge.periodChange.map {
+                                String(format: "%+.1f%%", $0 * 100)
+                             })
+
+                if points.count > 4 {
+                    Chart(points) { point in
+                        LineMark(x: .value("Time", point.x), y: .value("Period", point.y))
+                            .foregroundStyle(Theme.Palette.accent)
+                            .interpolationMethod(.monotone)
+                    }
+                    .chartXAxisLabel("Seconds")
+                    .chartYAxisLabel("Period (s)")
+                    .frame(height: 160)
+                }
+
+                if let change = ridge.periodChange, change > 0.05 {
+                    InlineNotice(
+                        level: .warning,
+                        title: "The period lengthened while it was being shaken",
+                        message: String(format: "The building's period rose %.0f%% ",
+                                        change * 100)
+                            + "between the start of this record and the end of it. A "
+                            + "before-and-after comparison would show the same total change "
+                            + "but not *when* it happened — and the moment the line steps "
+                            + "down is the moment the damage occurred.")
+                } else {
+                    Text("A wavelet uses a window that scales with the frequency it is "
+                         + "examining, so it keeps a fixed number of cycles at every scale. "
+                         + "That is what lets it time a change in period, which a spectrogram "
+                         + "with one fixed window cannot: short enough to time the change and "
+                         + "it cannot resolve the frequency, long enough to resolve the "
+                         + "frequency and the change has been smeared away.")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .instrumentPanel()
+        }
+    }
+
+    // MARK: Displacement
+
+    @ViewBuilder
+    private func displacementSection(_ analysis: Analysis) -> some View {
+        if let displacement = analysis.displacement, !displacement.displacement.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+                SectionLabel("Displacement", systemImage: "arrow.left.and.right",
+                             trailing: "Kalman, zero-velocity pinned")
+
+                ReadoutGrid(readouts: [
+                    Readout(label: "Came to rest",
+                            value: String(format: "%.1f", displacement.residual * 1000),
+                            unit: "mm",
+                            tint: abs(displacement.residual) > 0.005
+                                ? Theme.Palette.verdictAmber : Theme.Palette.accent,
+                            size: .large),
+                    Readout(label: "Sensor bias found",
+                            value: String(format: "%.4f", displacement.estimatedBias),
+                            unit: "m/s²", size: .small),
+                ], columns: 2)
+
+                Text("Integrating acceleration twice turns any constant bias into a parabola, "
+                     + "so a plain integration reports metres of drift that never happened. "
+                     + "The usual fix is a high-pass filter, which works and costs the very "
+                     + "lowest frequencies — where a permanent offset lives. Instead the "
+                     + "filter is told the sensor was genuinely still before the event and "
+                     + "after it, and estimates the bias from that. The offset survives the "
+                     + "processing, and residual displacement is one of the three things the "
+                     + "verdict rests on.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .instrumentPanel()
+        }
+    }
+
+    // MARK: Aftershocks
+
+    @ViewBuilder
+    private func aftershockSection(_ analysis: Analysis) -> some View {
+        if !analysis.aftershocks.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Metrics.spacing) {
+                SectionLabel("Aftershocks in this record", systemImage: "dot.radiowaves.up.forward",
+                             trailing: "\(analysis.aftershocks.count)")
+
+                ForEach(analysis.aftershocks.prefix(6)) { detection in
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(String(format: "%.1f s", detection.time))
+                            .font(Theme.Typography.numeric)
+                            .foregroundStyle(Theme.Palette.textPrimary)
+                            .frame(width: 72, alignment: .leading)
+                        Text(String(format: "%.0f%% of the mainshock",
+                                    detection.relativeAmplitude * 100))
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Palette.textSecondary)
+                        Spacer()
+                        Text(String(format: "r = %.2f", detection.correlation))
+                            .font(Theme.Typography.numericSmall)
+                            .foregroundStyle(Theme.Palette.textTertiary)
+                    }
+                }
+
+                Text("Found by correlating the record against its own strongest stretch, "
+                     + "rather than by looking for energy. An aftershock on the same fault "
+                     + "patch arrives at this sensor with very nearly the same shape as the "
+                     + "mainshock, just smaller — so matching on shape finds ones far too "
+                     + "small to trip the trigger. The threshold is set against the "
+                     + "correlation trace's own scatter, because a buried event produces a "
+                     + "small correlation that is nonetheless wildly improbable for noise.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .instrumentPanel()
+        }
     }
 
     // MARK: Cross-check
@@ -590,6 +1001,40 @@ struct AnalysisScreen: View {
                     .foregroundStyle(Theme.Palette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
+
+            // Two pickers, and what their disagreement means. The second is
+            // here because the first has a known blind spot on emergent onsets
+            // — and an emergent onset is a distant earthquake, which is the
+            // case where the extra seconds of warning matter most.
+            if let pick = analysis.kurtosisPick {
+                Divider().overlay(Theme.Palette.hairline)
+
+                ReadoutGrid(readouts: [
+                    Readout(label: "Kurtosis pick",
+                            value: String(format: "%.2f", pick.time), unit: "s", size: .small),
+                    Readout(label: "Sharpness",
+                            value: String(format: "%.1f", pick.sharpness), unit: "×",
+                            size: .small),
+                ], columns: 2)
+
+                if let comparison = analysis.pickComparison {
+                    Text(comparison.interpretation)
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(abs(comparison.differenceSeconds) > 0.15
+                                         ? Theme.Palette.textSecondary
+                                         : Theme.Palette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Text("Kurtosis measures how heavy the tails of the distribution are rather "
+                     + "than how much energy has arrived. Ambient noise is nearly Gaussian; "
+                     + "the first few large samples of a transient are emphatically not, and "
+                     + "the statistic jumps the moment they appear — before the energy has "
+                     + "built enough for a variance-based picker to notice.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .instrumentPanel()
@@ -672,6 +1117,9 @@ struct AnalysisScreen: View {
     private func run(on record: TriaxialRecord) async {
         let selectedWindow = window
         let bandwidth = smoothingBandwidth
+        let selectedEstimator = estimator
+        let selectedSmoother = smoother
+        let expectedPeriod = env.selectedBuilding?.empiricalPeriod ?? 1.0
 
         // All of it off the main thread: a Welch spectrum plus a hundred-period
         // response spectrum plus an STFT is far too much work for a frame.
@@ -679,8 +1127,17 @@ struct AnalysisScreen: View {
             let vertical = record.z
             let horizontal = PolarisationAnalysis.horizontalMagnitude(record)
 
-            let spectrum = Spectrum.welch(horizontal, window: selectedWindow)
-            let smoothed = Spectrum.konnoOhmachi(spectrum, bandwidth: bandwidth)
+            let spectrum = selectedEstimator == .welch
+                ? Spectrum.welch(horizontal, window: selectedWindow)
+                : Multitaper.spectrum(horizontal, tapers: 5)
+
+            let smoothed: PowerSpectrum
+            switch selectedSmoother {
+            case .none: smoothed = spectrum
+            case .konnoOhmachi: smoothed = Spectrum.konnoOhmachi(spectrum, bandwidth: bandwidth)
+            case .savitzkyGolay: smoothed = SavitzkyGolay.smooth(spectrum)
+            }
+
             let peaks = PeakPicking.peaks(in: smoothed)
             let crossChecked = PeriodEstimation.crossChecked(horizontal)
             let damping = Damping.best(horizontal, material: .reinforcedConcrete)
@@ -693,13 +1150,105 @@ struct AnalysisScreen: View {
             let trigger = STALTA.classic(vertical)
             let falseTrigger = FalseTriggerRejection.classify(record)
 
+            // Operational modal analysis. The Prony fit runs on the random
+            // decrement signature rather than on the raw record, because Prony
+            // assumes a sum of *free decays* and random decrement is precisely
+            // the operation that turns ambient response into one.
+            let decomposition = FrequencyDomainDecomposition.run(record, segmentLength: 1024)
+            let freeDecay = randomDecrement?.signature?.samples ?? []
+            let poles = freeDecay.count > 64
+                ? PronyAnalysis.poles(of: freeDecay, sampleRate: horizontal.sampleRate,
+                                      order: 12)
+                : []
+            let stablePoles = freeDecay.count > 128
+                ? StabilisationDiagram.run(freeDecay, sampleRate: horizontal.sampleRate)
+                : []
+
+            let lineTest = Multitaper.lineTest(horizontal, tapers: 5)
+
+            // Intrinsic modes, summarised by frequency and energy — the mode
+            // *shapes* are thousands of samples each and nothing on screen
+            // draws them, so carrying them would be carrying a copy of the
+            // record several times over.
+            let decomposed = EmpiricalModeDecomposition.decompose(horizontal.samples,
+                                                                  maximumModes: 5)
+            let intrinsicModes = decomposed.modes.map { mode in
+                (frequency: EmpiricalModeDecomposition.frequency(
+                    of: mode, sampleRate: horizontal.sampleRate),
+                 energy: mode.reduce(0) { $0 + $1 * $1 })
+            }
+
+            // The wavelet ridge, searched around the building's own band so it
+            // cannot wander onto a harmonic.
+            let ridge = WaveletRidge.run(
+                horizontal,
+                band: max(1 / (expectedPeriod * 3), 0.15)...min(1 / (expectedPeriod * 0.3),
+                                                                horizontal.sampleRate / 3),
+                voices: 10)
+
+            // Displacement, with the sensor pinned still wherever it genuinely
+            // was still.
+            let quiet = ConstrainedDisplacement.detectQuietWindows(horizontal)
+            let displacement = ConstrainedDisplacement.estimate(horizontal,
+                                                                quietWindows: quiet)
+
+            // Aftershocks, using the record's own strongest twenty seconds as
+            // the template. Self-templating: whatever the mainshock looked like
+            // at this station is exactly what its aftershocks will look like.
+            let aftershocks = Self.selfTemplatedAftershocks(in: horizontal)
+
+            let kurtosisPick = KurtosisPicker.pick(vertical, windowSeconds: 0.8)
+            var pickComparison: (differenceSeconds: Double, interpretation: String)?
+            if let kurtosisPick, let aic = ArrivalPicker.pickP(vertical) {
+                pickComparison = KurtosisPicker.compare(kurtosisPick: kurtosisPick.time,
+                                                        aicPick: aic.time)
+            }
+
             return Analysis(spectrum: spectrum, smoothed: smoothed, peaks: peaks,
                             crossChecked: crossChecked, damping: damping, envelope: envelope,
                             randomDecrement: randomDecrement,
                             responseSpectrum: responseSpectrum, spectrogram: spectrogram,
                             rectilinearity: rectilinearity, energy: energy,
-                            trigger: trigger, falseTrigger: falseTrigger)
+                            trigger: trigger, falseTrigger: falseTrigger,
+                            decomposition: decomposition, poles: poles,
+                            stablePoles: stablePoles, lineTest: lineTest,
+                            intrinsicModes: intrinsicModes, ridge: ridge,
+                            displacement: displacement, aftershocks: aftershocks,
+                            kurtosisPick: kurtosisPick, pickComparison: pickComparison)
         }.value
+    }
+
+    /// Cuts the record's own most energetic stretch as a template and looks for
+    /// repeats of it elsewhere in the same record.
+    ///
+    /// Self-templating rather than a library of generic wavelets, because the
+    /// thing that makes a matched filter work is that an aftershock on the same
+    /// fault patch produces very nearly the *same* waveform at the *same*
+    /// station — same path, same site response. A generic template throws that
+    /// away and becomes an expensive energy detector.
+    private static func selfTemplatedAftershocks(in w: Waveform) -> [MatchedFilter.Detection] {
+        let templateSamples = Int(min(20 * w.sampleRate, Double(w.count) / 4))
+        guard templateSamples >= 200, w.count > templateSamples * 3 else { return [] }
+
+        // The most energetic window is the mainshock.
+        var best = 0
+        var bestEnergy = 0.0
+        var start = 0
+        while start + templateSamples <= w.count {
+            let energy = w.samples[start..<(start + templateSamples)]
+                .reduce(0.0) { $0 + $1 * $1 }
+            if energy > bestEnergy { bestEnergy = energy; best = start }
+            start += templateSamples / 4
+        }
+        guard bestEnergy > 0 else { return [] }
+
+        let template = Array(w.samples[best..<(best + templateSamples)])
+        let found = MatchedFilter.detect(in: w, template: template,
+                                         threshold: .medianAbsoluteDeviation(multiple: 5),
+                                         minimumSeparation: Double(templateSamples)
+                                                          / w.sampleRate)
+        // The template matches itself perfectly; that is not an aftershock.
+        return found.filter { abs($0.sampleIndex - best) > templateSamples / 2 }
     }
 }
 

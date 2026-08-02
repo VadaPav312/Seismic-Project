@@ -98,6 +98,23 @@ public enum FoundationType: String, Codable, CaseIterable, Sendable {
 public enum SoilClass: String, Codable, CaseIterable, Sendable {
     case rock = "A", stiffRock = "B", denseSoil = "C", stiffSoil = "D", softSoil = "E"
 
+    /// Shear-wave velocity in the top thirty metres, m/s.
+    ///
+    /// The midpoint of each Eurocode 8 site class band. This is what the class
+    /// letter *is* — the letters are bands of this number — so recovering it is
+    /// a lookup rather than an estimate. Needed because foundation stiffness
+    /// depends on the soil's shear modulus, which is density times the square
+    /// of this.
+    public var shearWaveVelocity: Double {
+        switch self {
+        case .rock: 1_200        // > 800
+        case .stiffRock: 580     // 360–800
+        case .denseSoil: 270     // 180–360
+        case .stiffSoil: 140     // < 180
+        case .softSoil: 110      // very soft alluvium
+        }
+    }
+
     public var label: String {
         switch self {
         case .rock: "A — Hard rock"

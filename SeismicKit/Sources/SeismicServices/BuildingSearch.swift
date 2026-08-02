@@ -328,6 +328,74 @@ struct SPARQLResponse: Decodable {
     init(results: Results) { self.results = results }
 }
 
+/// One of the neighbours, as OpenStreetMap has it.
+///
+/// Deliberately thin. These are context, not subjects: none of them gets a
+/// baseline, an assessment or a verdict, and pretending otherwise by promoting
+/// each to a full `BuildingModel` would put nineteen buildings in the library
+/// that nobody is monitoring and that would sit there for ever with no data.
+/// What they carry is the shape and the storey count, which is all that is
+/// needed to stand them up next to yours and shake them.
+///
+/// Every optional here is genuinely optional in OpenStreetMap. A missing storey
+/// count is left missing rather than defaulted to three, and what the simulator
+/// draws for it is marked as an assumption on screen.
+public struct BlockBuilding: Sendable, Equatable, Codable, Identifiable {
+    public var id = UUID()
+    public var name: String
+    /// The footprint in local metres, relative to the imported building.
+    public var ring: [Coordinate2D]
+    public var centre: Coordinate2D
+    public var footprintArea: Double
+    public var storeyCount: Int?
+    public var height: Double?
+    public var material: String?
+    public var yearBuilt: Int?
+    /// The raw OSM `building` tag: "residential", "apartments", "yes"…
+    public var kind: String
+
+    public init(id: UUID = UUID(), name: String, ring: [Coordinate2D], centre: Coordinate2D,
+                footprintArea: Double, storeyCount: Int? = nil, height: Double? = nil,
+                material: String? = nil, yearBuilt: Int? = nil, kind: String = "yes") {
+        self.id = id
+        self.name = name
+        self.ring = ring
+        self.centre = centre
+        self.footprintArea = footprintArea
+        self.storeyCount = storeyCount
+        self.height = height
+        self.material = material
+        self.yearBuilt = yearBuilt
+        self.kind = kind
+    }
+
+    /// How tall to draw it, and whether that was measured or assumed.
+    ///
+    /// Returns the assumption *labelled* rather than silently. A block where
+    /// fifteen of twenty heights were guessed is a different picture from one
+    /// where they were all mapped, and the user is entitled to know which they
+    /// are looking at before drawing a conclusion from it.
+    public var estimatedHeight: (metres: Double, isMeasured: Bool) {
+        if let height, height > 2 { return (height, true) }
+        if let storeyCount, storeyCount > 0 { return (Double(storeyCount) * 3.1, true) }
+        // Nothing mapped. Two storeys is the median for an unlabelled OSM
+        // building outside a city centre, and it is the least misleading guess
+        // available — it will not make a terrace look like a skyline.
+        return (6.2, false)
+    }
+
+    /// A rough natural period, for making it sway.
+    ///
+    /// The standard code approximation, `0.1n` for a frame of n storeys. Crude,
+    /// and crude is right here: these are neighbours in the background, not
+    /// buildings under assessment, and giving them a solver-derived period
+    /// would imply a precision about them that nothing in the data supports.
+    public var approximatePeriod: Double {
+        let storeys = storeyCount ?? Int((estimatedHeight.metres / 3.1).rounded())
+        return max(Double(max(storeys, 1)) * 0.1, 0.15)
+    }
+}
+
 /// Overpass — OpenStreetMap. Also keyless, and the only source that gives a
 /// real footprint polygon rather than a rectangle guessed from a floor area.
 struct OverpassClient: Sendable {
@@ -444,6 +512,63 @@ struct OverpassClient: Sendable {
         }
 
         return (set, footprint)
+    }
+
+    // MARK: The rest of the street
+
+    /// Every building around a point, not just the one that was asked for.
+    ///
+    /// The single-building query already returns the whole block — sixty metres
+    /// of a city centre is a dozen buildings — and then discards all but one.
+    /// This keeps them.
+    ///
+    /// It is worth having because a lone building shaking on a black background
+    /// answers the wrong question. Nobody wants to know whether a structure
+    /// moves in an earthquake; everybody knows it does. What they want to know
+    /// is whether *theirs* moves more than the one next door, and that is a
+    /// comparison you cannot draw from one building. Twenty neighbours built to
+    /// the same code, on the same soil, given the same ground motion, and one
+    /// of them failing is an argument. One building failing alone is a cartoon.
+    func block(latitude: Double, longitude: Double, radius: Int,
+               client: ResilientClient) async throws -> [BlockBuilding] {
+        let body = Self.query(latitude: latitude, longitude: longitude, radius: radius)
+        let request = HTTPRequest(method: "POST", url: endpoint,
+                                  headers: ["Content-Type": "text/plain",
+                                            "User-Agent": "Seismic/1.0 (structural safety app)"],
+                                  body: Data(body.utf8), timeout: 30)
+        let response: OverpassResponse = try await client.json(request, as: OverpassResponse.self)
+
+        return response.elements.compactMap { element -> BlockBuilding? in
+            // Outlines only. A `building:part` is a piece of a building that is
+            // already in the list, and including them would stack a tower's own
+            // podium next to it as a separate structure.
+            guard let tags = element.tags, tags["building"] != nil else { return nil }
+            let ring = Self.localFootprint(element.outerGeometry,
+                                           originLatitude: latitude,
+                                           originLongitude: longitude)
+            guard ring.count >= 3 else { return nil }
+            let area = Self.polygonArea(ring)
+            // Sheds, bin stores and bicycle shelters. Below about twenty square
+            // metres nothing is a building in any sense this app cares about,
+            // and they clutter the model badly.
+            guard area >= 20 else { return nil }
+
+            let storeys = tags["building:levels"].flatMap { Int($0.prefix(3)) }
+            let height = tags["height"]
+                .map { $0.filter { $0.isNumber || $0 == "." } }
+                .flatMap(Double.init)
+
+            return BlockBuilding(
+                name: tags["name"] ?? tags["addr:housenumber"].map { "No. \($0)" } ?? "Unnamed",
+                ring: ring,
+                centre: Self.centroid(ring) ?? Coordinate2D(x: 0, y: 0),
+                footprintArea: area,
+                storeyCount: storeys,
+                height: height,
+                material: tags["building:material"],
+                yearBuilt: tags["start_date"].flatMap { Int($0.prefix(4)) },
+                kind: tags["building"] ?? "yes")
+        }
     }
 
     // MARK: Choosing the right building
@@ -1448,6 +1573,41 @@ public actor BuildingSearchService {
                                + "is editable and the estimate updates as you type.")
         }
         return Sourced(merged, origin: .live, provider: providers.joined(separator: " + "))
+    }
+
+    /// Everything standing around a building, for context in the simulator.
+    ///
+    /// Separate from `facts(for:)` rather than folded into it, because it is a
+    /// different question with a different failure mode. Failing to retrieve
+    /// the subject building is a problem the user has to be told about; failing
+    /// to retrieve its neighbours means the simulator draws one building
+    /// instead of twenty, which is exactly what it did before and is not worth
+    /// interrupting anybody over. So this returns an empty list rather than
+    /// throwing, with the reason attached.
+    ///
+    /// - Parameter radius: metres around the building. Sixty is about a city
+    ///   block; beyond a couple of hundred the query gets slow and the far side
+    ///   of it is no longer somewhere the same ground motion reliably arrives.
+    public func block(latitude: Double, longitude: Double,
+                      radius: Int = 90) async -> Sourced<[BlockBuilding]> {
+        guard let endpoint = vault.value(for: .overpassEndpoint).flatMap(URL.init(string:)) else {
+            return Sourced([], origin: .onDevice, provider: "None",
+                           note: "No OpenStreetMap endpoint is configured.")
+        }
+        do {
+            let found = try await OverpassClient(endpoint: endpoint)
+                .block(latitude: latitude, longitude: longitude,
+                       radius: max(20, min(radius, 400)), client: client)
+            guard !found.isEmpty else {
+                return Sourced([], origin: .live, provider: "OpenStreetMap",
+                               note: "OpenStreetMap has no building outlines mapped here.")
+            }
+            return Sourced(found, origin: .live, provider: "OpenStreetMap")
+        } catch {
+            return Sourced([], origin: .onDevice, provider: "None",
+                           note: "The neighbouring buildings could not be fetched. "
+                               + "The building itself is unaffected.")
+        }
     }
 
     /// Turns a fact set into a building, filling every gap with a stated
