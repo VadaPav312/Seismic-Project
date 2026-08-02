@@ -77,7 +77,7 @@ struct ResonanceSweepView: View {
 
     @ViewBuilder
     private var chart: some View {
-        if isSweeping {
+        if isSweeping && points.isEmpty {
             MeaningfulProgress(title: "Sweeping",
                                detail: "Running a full time-history solve at each of 60 "
                                      + "frequencies. This is the real solver, not a curve fit.",
@@ -112,10 +112,18 @@ struct ResonanceSweepView: View {
                     RuleMark(x: .value("Natural", naturalFrequency))
                         .foregroundStyle(Theme.Palette.textTertiary)
                         .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                        // Carries its own background. Sitting bare over the
+                        // plot it collided with whatever line or label was
+                        // behind it and neither could be read.
                         .annotation(position: .top, alignment: .leading) {
                             Text("natural")
-                                .font(.system(size: 9))
+                                .font(.system(size: 9, weight: .medium))
                                 .foregroundStyle(Theme.Palette.textTertiary)
+                                .padding(.horizontal, 5)
+                                .padding(.vertical, 2)
+                                .background(Theme.Palette.surface.opacity(0.92),
+                                            in: Capsule(style: .continuous))
+                                .padding(.leading, 3)
                         }
                 }
                 if let selectedFrequency,
@@ -259,6 +267,7 @@ struct ResonanceSweepView: View {
     private func runSweep() async {
         isSweeping = true
         progress = 0
+        points = []
         let model = ShearBuilding.from(building)
         // Read on the main actor and passed in, rather than captured: reaching
         // for main-actor state from inside a detached task is a data race, and
@@ -267,11 +276,28 @@ struct ResonanceSweepView: View {
 
         // Off the main thread: 60 full time-history solves is a second or two
         // of work and would drop every frame if it ran here.
-        let computed: [ResonanceSweep.Point] = await Task.detached(priority: .userInitiated) {
-            ResonanceSweep.sweep(model, amplitude: driveAmplitude)
-        }.value
+        //
+        // Streamed rather than awaited whole. `progress` used to be set to zero
+        // here and one at the end, so the bar it drove sat at nought for the
+        // entire sweep and then vanished — a progress indicator that never
+        // indicated progress. And the curve only existed once every frequency
+        // was done, which throws away the best thing about a resonance sweep:
+        // watching the peak rise out of the noise as the drive approaches the
+        // building's own frequency.
+        let stream = AsyncStream<(ResonanceSweep.Point, Double)> { continuation in
+            Task.detached(priority: .userInitiated) {
+                _ = ResonanceSweep.sweep(model, amplitude: driveAmplitude) { point, fraction in
+                    continuation.yield((point, fraction))
+                }
+                continuation.finish()
+            }
+        }
 
-        points = computed
+        for await (point, fraction) in stream {
+            points.append(point)
+            progress = fraction
+        }
+
         isSweeping = false
         progress = 1
         Haptics.shared.play(.assessmentComplete)

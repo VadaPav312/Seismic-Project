@@ -88,17 +88,32 @@ struct ShakeTableScreen: View {
         .chartYAxisLabel("Amplification")
         .frame(height: 260)
         .instrumentPanel()
-        .overlay(alignment: .topTrailing) {
+        // Top *left*, and with a background.
+        //
+        // Charts puts its Y-axis label in the top-right corner, so this sat
+        // directly on top of the word "Amplification" — a frequency in hertz
+        // and an axis label in the same few pixels, neither readable. The left
+        // corner is empty on a resonance curve, which rises from the bottom
+        // left, and the background means it stays readable even when it is not.
+        .overlay(alignment: .topLeading) {
             if isSweeping {
-                VStack(alignment: .trailing, spacing: 2) {
+                VStack(alignment: .leading, spacing: 2) {
                     Text(String(format: "%.2f Hz", frequency(forSpeed: currentSpeed)))
                         .font(Theme.Typography.numeric)
                         .foregroundStyle(Theme.Palette.verdictAmber)
-                    Text("sweeping")
+                        .contentTransition(.numericText())
+                    Text("SWEEPING")
                         .font(Theme.Typography.label)
+                        .tracking(1.1)
                         .foregroundStyle(Theme.Palette.textTertiary)
                 }
-                .padding(10)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(Theme.Palette.surface.opacity(0.9),
+                            in: RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusSmall,
+                                                 style: .continuous))
+                .padding(Theme.Metrics.s4)
+                .animation(Theme.Motion.quick, value: currentSpeed)
             }
         }
     }
@@ -215,9 +230,19 @@ struct ShakeTableScreen: View {
     private func computePrediction() async {
         guard let building else { return }
         let model = ShearBuilding.from(building)
-        predicted = await Task.detached(priority: .userInitiated) {
-            ResonanceSweep.sweep(model, amplitude: 0.3)
-        }.value
+        // Streamed, so the blue curve draws itself rather than appearing whole
+        // after a second of nothing. Sixty time-history solves is long enough
+        // to look broken.
+        predicted = []
+        let stream = AsyncStream<ResonanceSweep.Point> { continuation in
+            Task.detached(priority: .userInitiated) {
+                _ = ResonanceSweep.sweep(model, amplitude: 0.3) { point, _ in
+                    continuation.yield(point)
+                }
+                continuation.finish()
+            }
+        }
+        for await point in stream { predicted.append(point) }
     }
 
     private func start() {

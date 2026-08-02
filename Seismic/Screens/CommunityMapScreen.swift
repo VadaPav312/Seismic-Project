@@ -187,7 +187,16 @@ struct CommunityMapScreen: View {
                                 }
                             }
                         }
-                    } else {
+                    } else if layer == .earthquakes {
+                        // Named explicitly rather than left as `else`.
+                        //
+                        // There are four layers and this branch used to catch
+                        // every one it was not the first three of — so the
+                        // epicentre circles, which belong to the earthquake
+                        // catalogue alone, drew on top of the triage layer too.
+                        // Tapping a place there fetched a region history, and
+                        // dismissing the sheet left its circles scattered over
+                        // the buildings as though they were assessments.
                         ForEach(regionHistory?.events ?? []) { event in
                             Annotation(event.place, coordinate: CLLocationCoordinate2D(
                                 latitude: event.record.latitude,
@@ -278,7 +287,12 @@ struct CommunityMapScreen: View {
             if layer == .earthquakes { Task { await fetchRegionHistory() } }
         }
         .onChange(of: layer) { _, newLayer in
-            guard newLayer == .earthquakes else { return }
+            guard newLayer == .earthquakes else {
+                // Dropped on the way out, so nothing from the catalogue can
+                // survive into a layer that is about buildings.
+                regionHistory = nil
+                return
+            }
             Task { await fetchRegionHistory() }
         }
         .task { await fetchCommunityTags() }

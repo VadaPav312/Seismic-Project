@@ -1060,7 +1060,8 @@ public enum ResonanceSweep {
                              frequencies: [Double]? = nil,
                              amplitude: Double = 0.5,
                              cyclesPerFrequency: Double = 12,
-                             sampleRate: Double = 100) -> [Point] {
+                             sampleRate: Double = 100,
+                             onPoint: (@Sendable (Point, Double) -> Void)? = nil) -> [Point] {
         let period = ModalAnalysis.fundamentalPeriod(of: building)
         guard period > 0 else { return [] }
         let natural = 1 / period
@@ -1074,7 +1075,16 @@ public enum ResonanceSweep {
         let thresholds = DriftThresholds(slight: .infinity, moderate: .infinity,
                                          extensive: .infinity, complete: .infinity)
 
+        // Reported as each frequency finishes, with the fraction done, so a
+        // caller can draw the curve building up rather than a spinner over
+        // nothing. Sixty full time-history solves take a second or two, and a
+        // curve that assembles itself in front of you is the whole reason to
+        // watch a resonance sweep at all.
+        var completed = 0
         return list.compactMap { frequency -> Point? in
+            defer {
+                completed += 1
+            }
             guard frequency > 0.01, frequency < sampleRate / 4 else { return nil }
             let seconds = Swift.max(cyclesPerFrequency / frequency, 4)
 
@@ -1099,8 +1109,10 @@ public enum ResonanceSweep {
             let omega = 2 * Double.pi * frequency
             let groundDisplacement = amplitude / (omega * omega)
             let amplification = groundDisplacement > 1e-12 ? roofPeak / groundDisplacement : 0
-            return Point(frequency: frequency, amplification: amplification,
-                         roofDisplacement: roofPeak)
+            let point = Point(frequency: frequency, amplification: amplification,
+                              roofDisplacement: roofPeak)
+            onPoint?(point, Double(completed + 1) / Double(list.count))
+            return point
         }
     }
 }
