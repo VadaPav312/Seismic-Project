@@ -71,10 +71,10 @@ public actor SpeechService {
                            provider: "System voice")
         }
 
-        // Rachel — a calm, clear default. Overridable, because a household may
-        // want a voice they will recognise instantly at three in the morning.
+        // Overridable, because a household may want a voice they will
+        // recognise instantly at three in the morning.
         let voiceID = vault.value(for: .elevenLabsVoiceID).flatMap { $0.isEmpty ? nil : $0 }
-            ?? "21m00Tcm4TlvDq8ikWAM"
+            ?? Self.defaultVoiceID
 
         struct Settings: Encodable {
             var stability: Double
@@ -88,35 +88,101 @@ public actor SpeechService {
         }
 
         do {
-            let request = try HTTPRequest.json(
-                "POST",
-                URL(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceID)")!,
-                headers: ["xi-api-key": key, "Accept": "audio/mpeg"],
-                body: Body(text: trimmed,
-                           model_id: "eleven_turbo_v2_5",
-                           voice_settings: Settings(stability: urgency.stability,
-                                                    similarity_boost: 0.7,
-                                                    use_speaker_boost: true)),
-                // Six seconds and no more. If the voice has not arrived by
-                // then during an event, the device speaks it instead.
-                timeout: urgency == .emergency ? 6 : 20)
-
-            let response = try await client.send(request)
-            guard !response.body.isEmpty else { throw ServiceError.emptyResult }
-            cache.setValue(response.body, forKey: cacheKey, cost: response.body.count)
+            let audio = try await render(trimmed, voiceID: voiceID, key: key, urgency: urgency)
+            cache.setValue(audio, forKey: cacheKey, cost: audio.count)
             vault.setStatus(.valid(checkedAt: Date()), for: .elevenLabsAPIKey)
-            return Sourced(.audio(response.body, mimeType: "audio/mpeg"), origin: .live,
+            return Sourced(.audio(audio, mimeType: "audio/mpeg"), origin: .live,
                            provider: "ElevenLabs")
         } catch let error as ServiceError {
+            // A voice the plan is not entitled to is a *voice* problem, not a
+            // key problem, and it is worth one retry with a voice every account
+            // has. Free plans cannot use library voices through the API, which
+            // is not something anybody discovers from the ElevenLabs voice
+            // picker — it lists them all, and the refusal only arrives at the
+            // moment the app tries to speak. Falling back silently to the
+            // device voice would present that as "the network was slow" for
+            // ever.
+            if case .http(let status, _) = error, status == 402, voiceID != Self.defaultVoiceID {
+                if let audio = try? await render(trimmed, voiceID: Self.defaultVoiceID,
+                                                 key: key, urgency: urgency) {
+                    cache.setValue(audio, forKey: cacheKey, cost: audio.count)
+                    vault.setStatus(.valid(checkedAt: Date()), for: .elevenLabsAPIKey)
+                    return Sourced(.audio(audio, mimeType: "audio/mpeg"), origin: .live,
+                                   provider: "ElevenLabs",
+                                   note: "Your chosen voice needs a paid ElevenLabs plan, so the "
+                                       + "default voice was used instead.")
+                }
+            }
+
             if let status = error.keyStatus() {
                 vault.setStatus(status, for: .elevenLabsAPIKey)
             }
             return Sourced(.systemVoice(trimmed, rate: urgency.rate), origin: .onDevice,
                            provider: "System voice",
-                           note: "The voice service did not answer in time.")
+                           note: Self.explain(error))
         } catch {
             return Sourced(.systemVoice(trimmed, rate: urgency.rate), origin: .onDevice,
                            provider: "System voice")
+        }
+    }
+
+    /// George — a premade voice, available on every plan including the free
+    /// one. That last part is the whole reason it is the default: a default
+    /// that four out of five new users cannot actually use is not a default.
+    static let defaultVoiceID = "JBFqnCBsd6RMkjVDRZzb"
+
+    private func render(_ text: String, voiceID: String, key: String,
+                        urgency: Urgency) async throws -> Data {
+        struct Settings: Encodable {
+            var stability: Double
+            var similarity_boost: Double
+            var use_speaker_boost: Bool
+        }
+        struct Body: Encodable {
+            var text: String
+            var model_id: String
+            var voice_settings: Settings
+        }
+
+        let request = try HTTPRequest.json(
+            "POST",
+            URL(string: "https://api.elevenlabs.io/v1/text-to-speech/\(voiceID)")!,
+            headers: ["xi-api-key": key, "Accept": "audio/mpeg"],
+            body: Body(text: text,
+                       model_id: "eleven_turbo_v2_5",
+                       voice_settings: Settings(stability: urgency.stability,
+                                                similarity_boost: 0.7,
+                                                use_speaker_boost: true)),
+            // Six seconds and no more. If the voice has not arrived by then
+            // during an event, the device speaks it instead.
+            timeout: urgency == .emergency ? 6 : 20)
+
+        let response = try await client.send(request)
+        guard !response.body.isEmpty else { throw ServiceError.emptyResult }
+        return response.body
+    }
+
+    /// Why the device voice is speaking instead.
+    ///
+    /// It used to say "did not answer in time" whatever had happened, which is
+    /// true of a timeout and false of everything else — and the two that
+    /// actually occur, a key without the right permission and a plan without
+    /// the right voice, are both things somebody can fix in a minute if they
+    /// are told which one it is.
+    private static func explain(_ error: ServiceError) -> String {
+        switch error {
+        case .http(401, _), .noCredential:
+            "Your ElevenLabs key was refused. Check it in Settings → API keys."
+        case .http(403, _):
+            "Your ElevenLabs key does not have permission to generate speech."
+        case .http(402, _):
+            "Your ElevenLabs plan does not include this voice."
+        case .rateLimited, .http(429, _):
+            "ElevenLabs is rate-limiting this key."
+        case .http(let status, _) where status >= 500:
+            "ElevenLabs is having trouble at the moment."
+        default:
+            "The voice service did not answer in time."
         }
     }
 
