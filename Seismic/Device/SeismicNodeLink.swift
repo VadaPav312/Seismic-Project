@@ -155,9 +155,20 @@ final class SeismicNodeLink: NSObject, ObservableObject {
             }
         }
 
-        /// Ranks the list: nodes that advertised the service first, then by
-        /// signal. A board that named itself is almost always the one wanted.
-        var sortKey: Int { (advertisesNodeService ? 10_000 : 0) + rssi }
+        /// Ranks the list: anything that advertised a serial service first,
+        /// then anything that gave a name, then by signal.
+        ///
+        /// The name tier matters more than it sounds. An unfiltered scan in a
+        /// room turns up a dozen unnamed peripherals — headphones between
+        /// pairings, a car, somebody's watch — and sorting purely by signal
+        /// puts whichever of those happens to be closest above the board with
+        /// "HM-10" written on it three feet away.
+        var sortKey: Int {
+            (advertisesNodeService ? 10_000 : 0) + (hasName ? 1_000 : 0) + rssi
+        }
+
+        var hasName: Bool { name != DiscoveredPeripheral.unnamed }
+        static let unnamed = "Unnamed device"
     }
 
     /// Where a command has got to.
@@ -192,7 +203,24 @@ final class SeismicNodeLink: NSObject, ObservableObject {
     #if canImport(CoreBluetooth)
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
-    private var characteristic: CBCharacteristic?
+    /// Where commands go.
+    private var writeCharacteristic: CBCharacteristic?
+    /// Where the node's stream comes from.
+    ///
+    /// Two separate characteristics, because on a good many modules they *are*
+    /// two. Nordic UART splits them by design — 6E400003 notifies and 6E400002
+    /// accepts writes — and several HM-10 clones do the same. Insisting on one
+    /// characteristic that could do both found nothing at all on those, which
+    /// looked from the outside exactly like a board that was not there.
+    private var notifyCharacteristic: CBCharacteristic?
+    /// Services whose characteristics have been asked for and not yet returned.
+    ///
+    /// Selection waits for all of them. Taking the first workable
+    /// characteristic to arrive means taking whichever service the radio
+    /// happened to answer for first, which is not the same as the best one —
+    /// a vendor's own service with a notify characteristic on it would beat
+    /// FFE0/FFE1 roughly half the time, at random, between launches.
+    private var pendingServiceDiscoveries = 0
     /// Incoming bytes that have not yet formed a whole line.
     private var incomingBuffer = Data()
 
@@ -211,6 +239,12 @@ final class SeismicNodeLink: NSObject, ObservableObject {
 
     static let serviceUUID = CBUUID(string: "FFE0")
     static let characteristicUUID = CBUUID(string: "FFE1")
+
+    /// Nordic UART, which is two characteristics rather than one.
+    static let nordicService = CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E")
+    /// The module's transmit, so the phone's *receive*.
+    static let nordicNotify = CBUUID(string: "6E400003-B5A3-F393-E0A9-E50E24DCCA9E")
+    static let nordicWrite = CBUUID(string: "6E400002-B5A3-F393-E0A9-E50E24DCCA9E")
 
     /// The serial services these modules actually ship with.
     ///
@@ -504,9 +538,11 @@ final class SeismicNodeLink: NSObject, ObservableObject {
             simulator?.send(line: command.wire)
         case .bluetooth:
             #if canImport(CoreBluetooth)
-            guard let peripheral, let characteristic else {
+            guard let peripheral, let characteristic = writeCharacteristic else {
                 commandState[command.acknowledgementToken] =
-                    .failed(reason: "Not connected.")
+                    .failed(reason: notifyCharacteristic == nil
+                            ? "Not connected."
+                            : "This device does not accept commands.")
                 return
             }
             // withResponse where the characteristic supports it: a write the
@@ -733,7 +769,9 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         signalTask?.cancel()
         central?.stopScan()
         peripheral = nil
-        characteristic = nil
+        writeCharacteristic = nil
+        notifyCharacteristic = nil
+        pendingServiceDiscoveries = 0
         incomingBuffer = Data()
     }
 
@@ -801,7 +839,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         // unconfigured module advertises no name at all and is exactly the one
         // somebody is trying to find.
         let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
-            ?? peripheral.name ?? "Unnamed device"
+            ?? peripheral.name ?? DiscoveredPeripheral.unnamed
         let connectable =
             (advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber)?.boolValue ?? true
         let id = peripheral.identifier
@@ -862,7 +900,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
                                 error: Error?) {
         let rssi = RSSI.intValue
         Task { @MainActor in
-            guard self.characteristic != nil || self.connection.isLive else { return }
+            guard self.notifyCharacteristic != nil || self.connection.isLive else { return }
             self.connection = rssi < -85 ? .weakSignal(rssi: rssi) : .connected(rssi: rssi)
         }
     }
@@ -881,7 +919,9 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
                                     didDisconnectPeripheral peripheral: CBPeripheral,
                                     error: Error?) {
         Task { @MainActor in
-            characteristic = nil
+            writeCharacteristic = nil
+            notifyCharacteristic = nil
+            pendingServiceDiscoveries = 0
             signalTask?.cancel()
             incomingBuffer = Data()
             // The node keeps running and keeps its recording. Said plainly,
@@ -939,55 +979,122 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
             }
             return
         }
-        // Serial services first, then everything else. Discovering all the
-        // characteristics of every service costs one round trip each and means
-        // an unrecognised module still works, so long as it has something that
-        // can notify and something that can be written.
-        let ordered = services.sorted { a, b in
-            Self.knownSerialServices.contains(a.uuid) && !Self.knownSerialServices.contains(b.uuid)
+        // Every service's characteristics, then one decision across all of
+        // them. Discovering all of them costs one round trip each and means an
+        // unrecognised module still works.
+        Task { @MainActor in
+            self.pendingServiceDiscoveries = services.count
+            self.note("Connected. Reading \(services.count) "
+                      + "service\(services.count == 1 ? "" : "s").")
+            self.openLinkAnywayIfDiscoveryStalls(on: peripheral)
         }
-        for service in ordered {
+        for service in services {
             peripheral.discoverCharacteristics(nil, for: service)
+        }
+    }
+
+    /// Opens the link with whatever arrived, if not everything did.
+    ///
+    /// Selection waits for every service to report its characteristics, and a
+    /// service that never answers would otherwise mean waiting for ever — with
+    /// a perfectly usable FFE1 already discovered and sitting unused. Three
+    /// seconds is far longer than a GATT table takes to read over a link that
+    /// is working.
+    private func openLinkAnywayIfDiscoveryStalls(on peripheral: CBPeripheral) {
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(3))
+            await MainActor.run {
+                guard let self, self.notifyCharacteristic == nil,
+                      self.peripheral === peripheral else { return }
+                self.note("Not every service answered, so the link is being opened with what "
+                          + "did arrive.")
+                self.pendingServiceDiscoveries = 0
+                self.openLink(on: peripheral)
+            }
         }
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral,
                                 didDiscoverCharacteristicsFor service: CBService,
                                 error: Error?) {
-        let characteristics = service.characteristics ?? []
-        // FFE1 by name if it is there. Otherwise anything that can both stream
-        // and be written to, which is what the protocol actually requires —
-        // the UUID is a convention, the properties are the contract.
-        let named = characteristics.first { $0.uuid == Self.characteristicUUID }
-        let capable = characteristics.first { candidate in
-            let canStream = candidate.properties.contains(.notify)
-                || candidate.properties.contains(.indicate)
-            let canWrite = candidate.properties.contains(.write)
-                || candidate.properties.contains(.writeWithoutResponse)
-            return canStream && canWrite
-        }
-        guard let found = named ?? capable else { return }
-
         Task { @MainActor in
-            // The first workable service wins; later ones arrive afterwards
-            // and must not displace a link that is already streaming.
-            guard self.characteristic == nil else { return }
-            self.characteristic = found
-            peripheral.setNotifyValue(true, for: found)
-            if found.uuid == Self.characteristicUUID {
-                self.note("Link open on FFE1. Asking the node for its state.")
-            } else {
-                self.note("This module does not use FFE1, so the link is open on "
-                          + "\(found.uuid.uuidString) instead — it notifies and accepts writes, "
-                          + "which is all the protocol needs.")
+            self.pendingServiceDiscoveries -= 1
+            guard self.pendingServiceDiscoveries <= 0, self.notifyCharacteristic == nil else {
+                return
             }
-            // The node only sends telemetry once a second; asking immediately
-            // means the screen is populated before the first tick rather than
-            // a second after it.
-            self.send(.status)
-            self.confirmTrafficArrives()
+            self.openLink(on: peripheral)
         }
     }
+
+    /// Picks the two characteristics the protocol needs and subscribes.
+    ///
+    /// Chosen by *properties*, ranked, with the known serial UUIDs preferred —
+    /// the UUID is a convention and the properties are the contract. An HM-10
+    /// puts both on FFE1; Nordic UART splits them; a clone may put a notify on
+    /// its own vendor service and a write somewhere else entirely. All three
+    /// work out of this.
+    private func openLink(on peripheral: CBPeripheral) {
+        // Flattened into plain descriptions, chosen by logic that has no
+        // CoreBluetooth in it and is therefore testable without a board, then
+        // mapped back to the objects the radio needs.
+        var objects: [BluetoothSerial.Candidate: CBCharacteristic] = [:]
+        var candidates: [BluetoothSerial.Candidate] = []
+        var notifyCount = 0
+
+        for service in peripheral.services ?? [] {
+            for characteristic in service.characteristics ?? [] {
+                let properties = characteristic.properties
+                let canNotify = properties.contains(.notify) || properties.contains(.indicate)
+                let canWrite = properties.contains(.write)
+                    || properties.contains(.writeWithoutResponse)
+                guard canNotify || canWrite else { continue }
+                if canNotify { notifyCount += 1 }
+
+                let candidate = BluetoothSerial.Candidate(
+                    service: service.uuid.uuidString,
+                    characteristic: characteristic.uuid.uuidString,
+                    canNotify: canNotify, canWrite: canWrite)
+                candidates.append(candidate)
+                objects[candidate] = characteristic
+            }
+        }
+
+        let selection = BluetoothSerial.choose(from: candidates)
+        let bestNotify = selection.notify.flatMap { objects[$0] }
+        let bestWrite = selection.write.flatMap { objects[$0] }
+
+        guard let notify = bestNotify else {
+            fault("This device has no characteristic that can stream data, so it is not the "
+                  + "node — it is something else that happened to be nearby. Scan again and "
+                  + "pick the one your board advertises, which is usually named HM-10, "
+                  + "BT05, or whatever you renamed it to.")
+            return
+        }
+
+        notifyCharacteristic = notify
+        writeCharacteristic = bestWrite
+        peripheral.setNotifyValue(true, for: notify)
+
+        let notifyName = BluetoothSerial.shortName(notify.uuid.uuidString)
+        if let write = writeCharacteristic {
+            let writeName = BluetoothSerial.shortName(write.uuid.uuidString)
+            note("Link open — \(notifyCount) characteristic\(notifyCount == 1 ? "" : "s") can "
+                 + "stream, listening on \(notifyName) and sending on \(writeName).")
+        } else {
+            // Worth saying rather than discovering later: the screens will
+            // populate and every button will fail.
+            fault("Listening on \(notifyName), but nothing on this device accepts writes — so "
+                  + "the node can be watched and not commanded. Test earthquake and the "
+                  + "actuator controls will not work.")
+        }
+
+        // The node only sends telemetry once a second; asking immediately means
+        // the screen is populated before the first tick rather than a second
+        // after it.
+        send(.status)
+        confirmTrafficArrives()
+    }
+
 
     /// Checks that the link carries traffic, not merely that it exists.
     ///
@@ -1001,7 +1108,8 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(4))
             await MainActor.run {
-                guard let self, self.characteristic != nil, self.telemetry == nil else { return }
+                guard let self, self.notifyCharacteristic != nil,
+                      self.telemetry == nil else { return }
                 self.fault("Connected, but the node has sent nothing in four seconds — it should "
                            + "send telemetry every second. The link is fine; the board is not "
                            + "talking. Check the module is on Serial1 and that its baud rate "

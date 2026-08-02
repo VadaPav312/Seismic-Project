@@ -30,6 +30,7 @@ struct DeviceControlScreen: View {
         ScrollView {
             VStack(spacing: Theme.Metrics.spacingLoose) {
                 connectionCard
+                connectionLog
                 testEarthquake
                 commentaryCard
                 sequenceCard
@@ -142,6 +143,46 @@ struct DeviceControlScreen: View {
             .disabled(link.isEventRunning || link.state(of: .drill).isInFlight)
 
             CommandStateLabel(state: link.state(of: .drill), command: "DRILL")
+        }
+    }
+
+    // MARK: Getting connected
+
+    /// Every step of finding, connecting to and opening a link with a board.
+    ///
+    /// Bluetooth fails in a dozen ways that all look identical from outside —
+    /// nothing found, found but will not connect, connected but no services,
+    /// services but no characteristic that streams, streaming but silent — and
+    /// the difference between them is the difference between a five-second fix
+    /// and an evening. The link narrates each step and this shows it, so the
+    /// answer to "why isn't it working" is on the screen rather than in a
+    /// console attached to a laptop that is not in the room.
+    @ViewBuilder
+    private var connectionLog: some View {
+        let entries = link.log.filter { $0.kind == .note || $0.kind == .fault }.prefix(8)
+        if link.source == .bluetooth, !entries.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Metrics.s4) {
+                SectionLabel("Connection", systemImage: "antenna.radiowaves.left.and.right")
+
+                VStack(alignment: .leading, spacing: Theme.Metrics.s3) {
+                    ForEach(entries) { entry in
+                        HStack(alignment: .top, spacing: Theme.Metrics.s3) {
+                            Text(entry.at.formatted(date: .omitted, time: .standard))
+                                .font(Theme.Typography.numericSmall)
+                                .foregroundStyle(Theme.Palette.textGhost)
+                            Text(entry.text)
+                                .font(Theme.Typography.caption)
+                                .foregroundStyle(entry.kind == .fault
+                                                 ? Theme.Palette.verdictAmber
+                                                 : Theme.Palette.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .instrumentPanel()
         }
     }
 
@@ -857,13 +898,20 @@ struct FirmwareNodeScannerSheet: View {
         NavigationStack {
             List {
                 Section {
-                    if link.discovered.isEmpty {
+                    // Only while a scan is actually running. A spinner over a
+                    // radio that has already reported it cannot scan says the
+                    // opposite of the message directly beneath it.
+                    if link.discovered.isEmpty, link.connection == .scanning {
                         HStack(spacing: 10) {
                             ProgressView().controlSize(.small)
                             Text("Scanning…")
                                 .font(Theme.Typography.callout)
                                 .foregroundStyle(Theme.Palette.textSecondary)
                         }
+                    } else if link.discovered.isEmpty {
+                        Text("Not scanning.")
+                            .font(Theme.Typography.callout)
+                            .foregroundStyle(Theme.Palette.textSecondary)
                     }
                     ForEach(link.discovered.sorted { $0.sortKey > $1.sortKey }) { node in
                         Button {
