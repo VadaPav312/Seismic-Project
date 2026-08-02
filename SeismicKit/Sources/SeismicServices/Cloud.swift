@@ -455,6 +455,86 @@ public actor CloudService {
     public func signOut() { session = nil }
     public func currentSession() -> CloudSession? { session }
 
+    /// What deleting an account was actually able to do.
+    ///
+    /// Returned rather than thrown, because "some of it worked" is the normal
+    /// outcome and the user has to be told which parts. An account deletion
+    /// that reports success while rows remain on a server is the single most
+    /// dishonest thing this app could do, and a thrown error would collapse a
+    /// partial result into a total failure.
+    public struct DeletionOutcome: Sendable, Equatable {
+        /// Rows removed from each table, by name.
+        public var clearedTables: [String] = []
+        /// Tables that refused, with the reason.
+        public var failures: [String: String] = [:]
+        /// Whether the identity itself was removed from the auth server.
+        public var identityRemoved = false
+        /// Why the identity could not be removed, when it could not.
+        public var identityFailure: String?
+
+        public var isComplete: Bool { failures.isEmpty && identityRemoved }
+    }
+
+    /// Deletes everything this account owns on the server, then the account.
+    ///
+    /// Data first, identity last, and that order is not arbitrary: deleting the
+    /// identity revokes the token every subsequent request needs, so an
+    /// identity-first deletion leaves the rows orphaned and unreachable
+    /// for ever — permanently undeletable rather than deleted.
+    ///
+    /// The identity itself is removed through an RPC rather than the admin API.
+    /// Deleting a user with `auth/v1/admin/users` requires the service-role
+    /// key, and a service-role key shipped inside an app is a key that can
+    /// delete *anybody's* account — so the app calls a `delete_own_account`
+    /// function that Supabase runs with elevated rights and which can only ever
+    /// act on `auth.uid()`. Where that function has not been installed, this
+    /// reports the identity as not removed rather than pretending.
+    public func deleteAccount() async -> DeletionOutcome {
+        var outcome = DeletionOutcome()
+        guard let userID = session?.account.id else {
+            outcome.identityFailure = "Not signed in."
+            return outcome
+        }
+
+        // Every table keyed by owner. Ordered so that anything referencing
+        // another row goes first.
+        let tables = ["damage_notes", "assessments", "events", "community_tags",
+                      "observations", "buildings", "households"]
+
+        for table in tables {
+            do {
+                let url = try baseURL()
+                    .appendingPathComponent("rest/v1/\(table)")
+                    .appending(queryItems: [URLQueryItem(name: "owner_id",
+                                                         value: "eq.\(userID)")])
+                var requestHeaders = try headers()
+                requestHeaders["Prefer"] = "return=minimal"
+                _ = try await client.send(HTTPRequest(method: "DELETE", url: url,
+                                                      headers: requestHeaders, timeout: 30))
+                outcome.clearedTables.append(table)
+            } catch let error as ServiceError {
+                outcome.failures[table] = error.userFacingReason
+            } catch {
+                outcome.failures[table] = "Could not be reached."
+            }
+        }
+
+        do {
+            let url = try baseURL().appendingPathComponent("rest/v1/rpc/delete_own_account")
+            _ = try await client.send(HTTPRequest(method: "POST", url: url,
+                                                  headers: try headers(),
+                                                  body: Data("{}".utf8), timeout: 30))
+            outcome.identityRemoved = true
+        } catch let error as ServiceError {
+            outcome.identityFailure = error.userFacingReason
+        } catch {
+            outcome.identityFailure = "The account record could not be removed."
+        }
+
+        session = nil
+        return outcome
+    }
+
     // MARK: Sync
 
     /// Pushes one queued item. Conflicts are surfaced, never resolved silently.

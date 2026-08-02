@@ -58,18 +58,19 @@ struct PreparednessScreen: View {
                     countdownRehearsal
                 }
 
-                Button {
-                    let spoken = items(for: phase)
-                        .prefix(6)
-                        .map { "\($0.title). \($0.detail)" }
-                        .joined(separator: " ")
-                    voice.speak(spoken, urgency: phase == .during ? .emergency : .calm,
-                                force: true)
-                } label: {
-                    Label("Read this out", systemImage: "speaker.wave.2")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(SecondaryButtonStyle())
+                // The whole list, for somebody who is not going to read any of
+                // it. Each row has its own speaker as well; this is the one for
+                // "just tell me what to do".
+                SpeakButton(items(for: phase)
+                    .prefix(6)
+                    .map { "\($0.title). \($0.detail)" }
+                    .joined(separator: " "))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: Theme.Metrics.minimumTapTarget)
+                    .background(
+                        RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadius,
+                                         style: .continuous)
+                            .fill(Theme.Palette.glass))
             }
             .padding(Theme.Metrics.screenPadding)
             .contentColumn()
@@ -427,11 +428,20 @@ private struct PreparednessRow: View {
                         .multilineTextAlignment(.leading)
                 }
                 Spacer(minLength: 0)
+
+                // Outside the tick button's own label would put a button inside
+                // a button, which SwiftUI resolves by giving every tap to the
+                // outer one. It is a sibling in the same row instead.
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .instrumentPanel()
         }
         .buttonStyle(.plain)
+        .overlay(alignment: .topTrailing) {
+            SpeakButton("\(item.title). \(item.detail)", compact: true)
+                .padding(.trailing, 6)
+                .padding(.top, 4)
+        }
         .accessibilityAddTraits(isDone ? [.isButton, .isSelected] : .isButton)
     }
 }

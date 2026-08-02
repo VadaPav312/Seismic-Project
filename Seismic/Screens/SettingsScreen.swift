@@ -10,12 +10,14 @@ struct SettingsScreen: View {
     @EnvironmentObject private var voice: VoiceController
     @EnvironmentObject private var notifications: NotificationCentre
     @EnvironmentObject private var tutorial: TutorialDirector
+    @Environment(\.dismiss) private var dismiss
     @State private var showingLedger = false
     @State private var showingGlossary = false
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: Theme.Metrics.s6) {
+                showcaseButton
                 accountGroup
                 referenceGroup
                 dataGroup
@@ -69,7 +71,16 @@ struct SettingsScreen: View {
                     title: services.account?.displayName ?? "Not signed in",
                     detail: services.household.map { "\($0.members.count) in \($0.name)" }
                         ?? "Sign in to back up and share, or carry on without",
-                    systemImage: services.account?.provider.systemImage ?? "person.crop.circle",
+                    systemImage: services.account?.provider.systemImage ?? "person.crop.circle"
+                ) { SettingsChevron() }
+            }
+            .buttonStyle(.plain)
+
+            NavigationLink { AccountScreen() } label: {
+                SettingsRow(
+                    title: "Sign out or delete account",
+                    detail: "Signing out keeps your data. Deleting removes it everywhere.",
+                    systemImage: "person.crop.circle.badge.xmark",
                     showsDivider: false
                 ) { SettingsChevron() }
             }
@@ -196,11 +207,55 @@ struct SettingsScreen: View {
         }
     }
 
+    /// The one button for showing this to somebody.
+    ///
+    /// Given its own card above the settings list rather than a row inside it,
+    /// because it is not a setting: it is the thing a presenter reaches for
+    /// while somebody is already watching, and hunting for it in a list of
+    /// toggles is the worst thirty seconds of any demonstration.
+    private var showcaseButton: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.s4) {
+            SectionLabel("Show it to someone", systemImage: "play.rectangle.on.rectangle")
+
+            Text("Runs the whole thing by itself for three and a half minutes — the model, a "
+                 + "real earthquake record, the hardware's full event sequence, the emergency "
+                 + "call, the measurement afterwards and the map. It narrates each beat a "
+                 + "moment before it happens, so an audience is looking at the right part of "
+                 + "the screen when it changes. Nothing needs to be touched.")
+                .font(Theme.Typography.callout)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                env.presentationMode = .showcase
+                env.isPresentationMode = true
+                Haptics.shared.play(.eventTriggered)
+                dismiss()
+            } label: {
+                VStack(spacing: 5) {
+                    Text("RUN THE FULL DEMONSTRATION")
+                        .font(.system(size: 16, weight: .bold))
+                        .tracking(0.9)
+                        .minimumScaleFactor(0.7)
+                        .lineLimit(1)
+                    Text("3 minutes 30 seconds · hands off")
+                        .font(Theme.Typography.caption)
+                        .opacity(0.85)
+                }
+                .frame(maxWidth: .infinity)
+                .frame(height: 78)
+            }
+            .buttonStyle(PrimaryButtonStyle())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .instrumentPanel()
+    }
+
     private var demonstrationGroup: some View {
         SettingsGroup(
             header: "Demonstration",
-            footer: "Presentation mode walks through the app's highlights automatically, for "
-                + "showing it to somebody."
+            footer: "Presentation mode is the shorter ninety-second version of the same thing, "
+                + "without the hardware sequence."
         ) {
             SettingsRow(title: "Replay the introduction",
                         systemImage: "arrow.counterclockwise",
@@ -212,7 +267,14 @@ struct SettingsScreen: View {
                         action: { tutorial.requestReplay() })
             SettingsRow(title: "Presentation mode", systemImage: "play.rectangle",
                         showsDivider: false) {
-                Toggle("", isOn: $env.isPresentationMode).labelsHidden()
+                Toggle("", isOn: Binding(
+                    get: { env.isPresentationMode },
+                    set: { on in
+                        // The toggle always means the short script; the long one
+                        // has its own button and sets the mode itself.
+                        if on { env.presentationMode = .brief }
+                        env.isPresentationMode = on
+                    })).labelsHidden()
             }
         }
     }

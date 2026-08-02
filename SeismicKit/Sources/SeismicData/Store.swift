@@ -1,6 +1,7 @@
 import Foundation
 import SeismicCore
 import SeismicSignal
+import SeismicGeo
 
 /// Offline-first persistence.
 ///
@@ -91,7 +92,38 @@ public final class SeismicStore: @unchecked Sendable {
         if !didLoad || buildingsList().isEmpty {
             seed()
         }
+        repairMissingFootprints()
         return snapshot()
+    }
+
+    /// Gives a plan to any building saved without one.
+    ///
+    /// The simulator falls back to a box when a building has no footprint —
+    /// correctly, since there is nothing to extrude — and buildings saved by
+    /// earlier versions of the app can be in exactly that state. Without this
+    /// they would stay boxes for ever on any device that had already run the
+    /// app, which is every device that matters and none of the ones a fresh
+    /// install would reveal.
+    ///
+    /// The substitute is derived from what is actually known: the recorded
+    /// floor area, and a plan whose corners are rounded rather than square,
+    /// which is the better default for the overwhelming majority of buildings.
+    /// It is a *fallback*, not a claim — a real traced outline, wherever there
+    /// is one, is never touched.
+    private func repairMissingFootprints() {
+        lock.lock()
+        let needing = buildings.values.filter { $0.footprint.count < 3 }
+        lock.unlock()
+        guard !needing.isEmpty else { return }
+
+        for var building in needing {
+            let area = building.footprintArea > 1
+                ? building.footprintArea
+                : max(building.height * building.height * 0.1, 60)
+            building.footprint = PlanShape.roundedSquare.polygon(area: area)
+            lock.lock(); buildings[building.id] = building; lock.unlock()
+        }
+        save()
     }
 
     private func readFromDisk() -> Bool {
@@ -405,6 +437,69 @@ public final class SeismicStore: @unchecked Sendable {
                                                            includingPropertiesForKeys: [.fileSizeKey]))?
             .reduce(0) { $0 + size(of: $1) } ?? 0
         return (documents, recordings)
+    }
+
+    // MARK: - Erasing
+
+    /// What an erase actually removed, so the app can say so rather than assume.
+    public struct EraseOutcome: Sendable, Equatable {
+        public var documentsRemoved: [String] = []
+        public var recordingsRemoved = 0
+        /// Files that would not delete, by name, with the reason.
+        public var failures: [String: String] = [:]
+        public var isComplete: Bool { failures.isEmpty }
+    }
+
+    /// Removes every trace of the user's data from this device.
+    ///
+    /// The whole directory is enumerated rather than a known list of filenames
+    /// being deleted, because a list is a thing that goes stale: a future
+    /// document added to `save()` and forgotten here would survive an erase
+    /// silently, which is the one failure mode this method exists to prevent.
+    ///
+    /// It reports what it removed and what it could not, and the caller shows
+    /// that. "Your data has been deleted" printed over a file that is still
+    /// there is worse than no claim at all.
+    @discardableResult
+    public func eraseEverything() -> EraseOutcome {
+        var outcome = EraseOutcome()
+        let manager = FileManager.default
+
+        lock.lock()
+        buildings = [:]; events = [:]; assessments = [:]
+        observations = []; earthquakes = [:]; tags = [:]; notes = [:]
+        lock.unlock()
+        recordingCache.removeAll()
+        ledger.replace(with: [])
+        syncQueue.clear()
+
+        let recordingsDirectory = directory.appendingPathComponent("recordings")
+        if let files = try? manager.contentsOfDirectory(at: recordingsDirectory,
+                                                        includingPropertiesForKeys: nil) {
+            for file in files {
+                do {
+                    try manager.removeItem(at: file)
+                    outcome.recordingsRemoved += 1
+                } catch {
+                    outcome.failures[file.lastPathComponent] = error.localizedDescription
+                }
+            }
+        }
+
+        if let files = try? manager.contentsOfDirectory(at: directory,
+                                                        includingPropertiesForKeys: nil) {
+            for file in files where file.pathExtension == "json" {
+                do {
+                    try manager.removeItem(at: file)
+                    outcome.documentsRemoved.append(file.lastPathComponent)
+                } catch {
+                    outcome.failures[file.lastPathComponent] = error.localizedDescription
+                }
+            }
+        }
+
+        outcome.documentsRemoved.sort()
+        return outcome
     }
 
     // MARK: - Persistence

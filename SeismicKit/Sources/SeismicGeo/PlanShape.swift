@@ -29,6 +29,18 @@ public enum PlanShape: String, Codable, Sendable, CaseIterable {
     case curvedSlab
     case octagonal
     case triangular
+    /// A square whose corners are rounded off rather than cut square.
+    ///
+    /// The plan of most towers built since about 1990, and it is not a
+    /// stylistic detail: a sharp corner sheds vortices at a single frequency
+    /// and drives across-wind oscillation, so corners get rounded or chamfered
+    /// specifically to break that up. Drawing one of these as a sharp square is
+    /// wrong about the building's silhouette and about why it has the shape it
+    /// has.
+    case roundedSquare
+    /// A triangle with rounded corners — a lattice tower's base, and a great
+    /// many mid-century towers on triangular sites.
+    case roundedTriangular
     /// A slab that narrows as it rises — modelled at its base extent here.
     case setbackTower
 
@@ -46,6 +58,8 @@ public enum PlanShape: String, Codable, Sendable, CaseIterable {
         case .octagonal: "Octagonal"
         case .triangular: "Triangular"
         case .setbackTower: "Setback tower"
+        case .roundedSquare: "Rounded square"
+        case .roundedTriangular: "Rounded triangle"
         }
     }
 
@@ -53,9 +67,10 @@ public enum PlanShape: String, Codable, Sendable, CaseIterable {
     /// actually care about.
     public var isIrregular: Bool {
         switch self {
-        case .lShaped, .tShaped, .uShaped, .cruciform, .triangular: true
+        case .lShaped, .tShaped, .uShaped, .cruciform, .triangular,
+             .roundedTriangular: true
         case .rectangular, .square, .circular, .elliptical, .curvedSlab,
-             .octagonal, .setbackTower: false
+             .octagonal, .setbackTower, .roundedSquare: false
         }
     }
 
@@ -65,7 +80,7 @@ public enum PlanShape: String, Codable, Sendable, CaseIterable {
     /// for the smoothing to have something to fit, and a rectangle needs four.
     public var isCurved: Bool {
         switch self {
-        case .circular, .elliptical, .curvedSlab: true
+        case .circular, .elliptical, .curvedSlab, .roundedSquare, .roundedTriangular: true
         default: false
         }
     }
@@ -108,6 +123,18 @@ public enum PlanShape: String, Codable, Sendable, CaseIterable {
 
         case .triangular:
             return Self.regularPolygon(sides: 3, area: area)
+
+        case .roundedSquare:
+            return Self.rounded(Self.rectangle(width: 1, depth: 1),
+                                radiusFraction: 0.26, area: area)
+
+        case .roundedTriangular:
+            // A larger fraction than the square, because a triangle's corners
+            // are sixty degrees and a modest cut takes very little off them —
+            // the base of a lattice tower is visibly closer to a rounded blob
+            // than to a triangle with the tips filed down.
+            return Self.rounded(Self.regularPolygon(sides: 3, area: 1),
+                                radiusFraction: 0.34, area: area)
 
         case .lShaped:
             // Two equal legs meeting at a corner. Removing a quarter of the
@@ -269,6 +296,68 @@ public enum PlanShape: String, Codable, Sendable, CaseIterable {
         // Rescale to the requested area.
         let enclosed = shoelaceArea(raw)
         guard enclosed > 1e-6 else { return rectangle(width: width, depth: depth) }
+        let scale = (area / enclosed).squareRoot()
+        return raw.map { Coordinate2D(x: $0.x * scale, y: $0.y * scale) }
+    }
+
+    /// Rounds every corner of a closed ring and rescales it to `area`.
+    ///
+    /// Each corner is replaced by a quadratic Bézier that leaves along one edge
+    /// and arrives along the other, with the original vertex as its control
+    /// point — so the curve is tangent to both walls and meets them without a
+    /// kink, which a circular fillet only manages if its radius is computed per
+    /// corner from the angle. The area is measured *after* rounding and the
+    /// whole ring scaled to hit the target, because rounding always removes
+    /// area and a plan that quietly lost eight per cent of its floor space
+    /// would quietly lose the same fraction of the building's mass.
+    ///
+    /// - Parameter radiusFraction: how far along the shorter of the two edges
+    ///   the curve starts, as a fraction of that edge. Clamped below a half,
+    ///   above which adjacent corners would overlap.
+    private static func rounded(_ ring: [Coordinate2D], radiusFraction: Double,
+                                area: Double, segments: Int = 7) -> [Coordinate2D] {
+        // The rectangle/polygon helpers return a closed ring; the duplicated
+        // last point would be rounded as if it were a corner of its own.
+        var points = ring
+        if points.count > 1, let first = points.first, let last = points.last,
+           abs(first.x - last.x) < 1e-9, abs(first.y - last.y) < 1e-9 {
+            points.removeLast()
+        }
+        guard points.count >= 3 else { return ring }
+
+        let fraction = min(max(radiusFraction, 0.01), 0.49)
+        var out: [(Double, Double)] = []
+
+        for index in points.indices {
+            let previous = points[(index + points.count - 1) % points.count]
+            let vertex = points[index]
+            let next = points[(index + 1) % points.count]
+
+            let inLength = hypot(vertex.x - previous.x, vertex.y - previous.y)
+            let outLength = hypot(next.x - vertex.x, next.y - vertex.y)
+            let cut = fraction * min(inLength, outLength)
+            guard cut > 1e-9, inLength > 1e-9, outLength > 1e-9 else {
+                out.append((vertex.x, vertex.y))
+                continue
+            }
+
+            let start = (x: vertex.x + (previous.x - vertex.x) / inLength * cut,
+                         y: vertex.y + (previous.y - vertex.y) / inLength * cut)
+            let end = (x: vertex.x + (next.x - vertex.x) / outLength * cut,
+                       y: vertex.y + (next.y - vertex.y) / outLength * cut)
+
+            for step in 0...segments {
+                let t = Double(step) / Double(segments)
+                let inverse = 1 - t
+                let x = inverse * inverse * start.x + 2 * inverse * t * vertex.x + t * t * end.x
+                let y = inverse * inverse * start.y + 2 * inverse * t * vertex.y + t * t * end.y
+                out.append((x, y))
+            }
+        }
+
+        let raw = close(out)
+        let enclosed = shoelaceArea(raw)
+        guard enclosed > 1e-9 else { return ring }
         let scale = (area / enclosed).squareRoot()
         return raw.map { Coordinate2D(x: $0.x * scale, y: $0.y * scale) }
     }

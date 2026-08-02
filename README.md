@@ -25,7 +25,7 @@ Requires Xcode 16 or later and iOS 17+.
 cd SeismicKit && swift test
 ```
 
-949 tests across seven modules. Every one of the seventy-four algorithms is
+966 tests across seven modules. Every one of the seventy-four algorithms is
 tested against a known input with an expected output, and every network client
 is tested against a stubbed transport — including the paths that fail, which are
 the ones that matter and the ones a live-network test would never reach
@@ -140,10 +140,16 @@ distant magnitude 7.4, structural damage, and a connection drop mid-event. These
 are labelled and in the open rather than hidden behind a debug flag, because the
 product is meant to be shown to somebody without hardware.
 
-Presentation mode drives the app itself through a ninety-second argument —
-building, simulation, warning, measurement, map — captioning each beat a moment
-before it happens, so an audience is looking at the right part of the screen when
-it changes. It is in the ⋯ menu.
+**Settings → Run the full demonstration** hands the whole thing over for three
+and a half minutes: the model, a real earthquake record, the node's complete
+event sequence, the emergency call, the measurement afterwards and the map. The
+caption for each beat assembles itself a word at a time, at about reading speed,
+so an audience is looking at the right part of the screen when it changes — and
+the hardware beats are driven by the *node's* own messages, so if the board
+stalls the demonstration visibly stalls with it. Nothing needs to be touched.
+
+Presentation mode in the ⋯ menu is the shorter ninety-second version of the same
+argument, without the hardware sequence.
 
 To open straight onto any screen — useful for screenshots and demos. Every
 section works, not only the five with tabs:
@@ -154,6 +160,9 @@ SEISMIC_INITIAL_TAB=prepare
 SEISMIC_INITIAL_TAB=network
 SEISMIC_INITIAL_TAB=device
 SEISMIC_INITIAL_TAB=channels
+SEISMIC_SHOWCASE=1        starts the full demonstration on launch
+SEISMIC_SKIP_SIGN_IN=1    grants a guest account and suppresses the
+                          notification prompt, for screenshot runs
 ```
 
 ## The hardware
@@ -183,6 +192,36 @@ Two things worth knowing about the protocol as built:
 * **The gas valve is modelled and unavailable.** A servo drawing 250 mA
   alongside a stepper drawing 260 browns out a board with a 500 mA budget. One
   actuator had to be shed; the console says so rather than hiding it.
+
+## The parts that talk
+
+**The node narrates itself.** The same message stream that drives the
+instrument panels is read a second time in plain English — "I can feel the
+building moving and I can hear it, that's 2 of my 3 sensors, so I'm declaring
+it", "shutting off the building's power now", "confirmed off, I watched the
+light go from 320 to 890". It is not a log: telemetry arrives every second and
+acceleration far faster, and almost every line is unchanged from the one before
+it, so a sentence is only emitted when something *changed*. Four of them are
+important enough to be spoken aloud and the rest are not, which is the whole
+difference between a commentary and a machine talking through an earthquake.
+
+It also infers one thing the node cannot sense directly: a loud noise with no
+ground motion underneath it is not shaking, it is something hitting the floor.
+During an event that means debris, which is exactly what somebody deciding
+whether to walk back inside needs told.
+
+**The phone calls emergency services, and does not.** A node that has just
+declared an earthquake knows the address, the height, the construction, the
+shaking, whether anyone was home and which utilities are already off — eleven
+seconds of report, more accurate than anything an occupant could manage while
+the floor is moving. So the app places the call and reads it out. There is no
+`tel:` URL anywhere in the file and no telephony framework imported: an app that
+demonstrates an automatic emergency call must not be one wrong tap away from
+placing one. Every stage is a timer and every dispatcher line is a script, and
+the banner saying so is the first element on the screen and cannot be dismissed.
+The *report* is real — assembled from the actual event, the actual building, and
+only those actuators whose shutoff was physically confirmed, because telling a
+dispatcher the power is off when it might not be is how a firefighter gets hurt.
 
 ## Notes on a few decisions
 

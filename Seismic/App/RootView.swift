@@ -119,6 +119,16 @@ struct RootView: View {
                     .zIndex(100)
             }
 
+            // Above even the takeover, because a call in progress is the one
+            // thing that has to be interruptible: somebody who wants to speak
+            // to the dispatcher themselves must be able to reach the screen.
+            // Wrapped in its own view so the call object is *observed*. Reading
+            // `env.emergencyCall.stage` here directly would not redraw
+            // anything: the call is its own ObservableObject, and a change
+            // inside it never republishes the environment that holds it.
+            EmergencyCallHost(call: env.emergencyCall)
+                .zIndex(110)
+
             // Below the takeover in the stack, deliberately: if a real event
             // happens during a demonstration, the demonstration gets out of
             // the way.
@@ -166,6 +176,10 @@ struct RootView: View {
                 return
             }
             startTutorialIfDue()
+            if ProcessInfo.processInfo.environment["SEISMIC_SHOWCASE"] == "1" {
+                env.presentationMode = .showcase
+                env.isPresentationMode = true
+            }
         }
         // The intro ends by setting this, which is the moment the real interface
         // first appears — and therefore the only moment a tour of it makes sense.
@@ -206,7 +220,9 @@ struct RootView: View {
         }
         .onChange(of: env.isPresentationMode) { _, isOn in
             if isOn {
-                director.start(environment: env) { section in show(section) }
+                director.start(environment: env, mode: env.presentationMode) { section in
+                    show(section)
+                }
             } else {
                 director.stop()
             }

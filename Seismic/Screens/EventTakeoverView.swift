@@ -45,14 +45,24 @@ struct EventTakeoverView: View {
 
             VStack(spacing: 0) {
                 header
-                Spacer(minLength: 0)
+                Spacer(minLength: Theme.Metrics.s4)
                 countdown
-                Spacer(minLength: 0)
+                Spacer(minLength: Theme.Metrics.s4)
                 instruction
                 actuatorStrip
                 safeButton
             }
-            .padding(Theme.Metrics.screenPadding)
+            // The horizontal inset is wider than a normal screen's because
+            // everything here is centred display type that reads badly when it
+            // reaches the bezel, and the vertical insets are separate: the
+            // status bar is hidden, so the top has to buy back the clearance
+            // it would have given, and the bottom sits above the home
+            // indicator rather than under it. A single symmetric padding put
+            // "I'M SAFE" hard against the gesture area, where iOS takes the
+            // first part of any upward swipe for itself.
+            .padding(.horizontal, Theme.Metrics.s6)
+            .padding(.top, Theme.Metrics.s5)
+            .padding(.bottom, Theme.Metrics.s4)
             .contentColumn()
         }
         .onReceive(ticker) { _ in
@@ -202,16 +212,24 @@ struct EventTakeoverView: View {
     /// One button, the full width of the screen, impossible to miss and
     /// impossible to hit by accident because nothing else is tappable.
     private var safeButton: some View {
-        VStack(spacing: 10) {
+        VStack(spacing: Theme.Metrics.s4) {
             if event.userAcknowledged {
-                HStack(spacing: 6) {
+                HStack(spacing: Theme.Metrics.s3) {
                     Image(systemName: "checkmark.circle.fill")
-                    Text("Marked safe. Your household has been told.")
+                        .font(.system(size: 20, weight: .semibold))
+                    Text("Marked safe.\nYour household has been told.")
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
                 }
                 .font(Theme.Typography.callout.weight(.medium))
                 .foregroundStyle(.white)
-                .frame(maxWidth: .infinity)
-                .frame(height: 68)
+                // Padded inside the pill rather than given a fixed height. The
+                // sentence is long enough to reach both rounded corners on a
+                // narrow phone, and a fixed 68 points clipped it outright at
+                // the larger accessibility text sizes.
+                .padding(.horizontal, Theme.Metrics.s5)
+                .padding(.vertical, Theme.Metrics.s4)
+                .frame(maxWidth: .infinity, minHeight: 68, alignment: .leading)
                 .background(
                     RoundedRectangle(cornerRadius: Theme.Metrics.cornerRadiusLarge,
                                      style: .continuous)
@@ -220,6 +238,7 @@ struct EventTakeoverView: View {
                 Button("Dismiss") { env.dismissActiveEvent() }
                     .font(Theme.Typography.callout)
                     .foregroundStyle(.white.opacity(0.7))
+                    .frame(height: Theme.Metrics.minimumTapTarget)
             } else {
                 Button("I'M SAFE") { env.acknowledgeActiveEvent() }
                     .buttonStyle(EmergencyButtonStyle())
@@ -229,6 +248,7 @@ struct EventTakeoverView: View {
                     Button("End drill") { env.dismissActiveEvent() }
                         .font(Theme.Typography.callout)
                         .foregroundStyle(.white.opacity(0.7))
+                        .frame(height: Theme.Metrics.minimumTapTarget)
                 }
             }
         }

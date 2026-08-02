@@ -68,7 +68,12 @@ public enum SeedLibrary {
                 // that matters lives, and the app's plan is one shape for the
                 // whole height. The taper is the part that was badly wrong: a
                 // uniform 634 m triangular prism is not a tower, it is a wall.
-                plan: .triangular,
+                // Rounded, not sharp. The base is a triangle with heavily
+                // radiused corners — the three legs are enormous rounded
+                // columns, not points — and by three hundred metres the section
+                // is circular. A rounded triangle is the closest single plan to
+                // both ends of that.
+                plan: .roundedTriangular,
                 // Concave, not a straight cone. The Skytree narrows hard over
                 // its first hundred and fifty metres and then runs on as a
                 // nearly constant shaft — the hyperboloid profile it borrows
@@ -129,7 +134,13 @@ public enum SeedLibrary {
                     + "rather than merely to avoid collapse — a much higher bar.",
                 events: [],
                 image: "building.2",
-                plan: .square,
+                // Not a square. The corners are rounded the whole way up and
+                // the plan becomes very nearly circular near the top — done
+                // deliberately, because a sharp corner sheds vortices at one
+                // frequency and drives a tower across the wind. A tower whose
+                // shape exists to solve a dynamics problem should not be drawn
+                // as the shape it was chosen not to be.
+                plan: .roundedSquare,
                 // A gentle continuous taper rather than a pyramid: the
                 // silhouette narrows the whole way up, which is what makes it
                 // read as tall from across the bay. Nothing like the
@@ -202,6 +213,26 @@ public enum SeedLibrary {
             address: "Demonstration building with simulated history",
             latitude: 37.7749, longitude: -122.4194,
             storeyCount: 8, height: 27.2, footprintArea: 620,
+            // Given a real plan and a real massing, like every other building
+            // in the library.
+            //
+            // It had neither, and it is the building the app opens onto — so
+            // the first thing anybody saw in the simulator was a grey brick,
+            // while the seeded towers behind it in the library all had their
+            // proper outlines. The renderer was never the problem: with an
+            // empty footprint it falls back to a box of the right bounding
+            // dimensions, correctly, and this was simply the one model that
+            // never gave it anything to extrude.
+            footprint: PlanShape.roundedSquare.polygon(area: 620),
+            massing: Massing(stations: [
+                // A wider ground floor and a set-back top storey: the ordinary
+                // profile of an eight-storey concrete block, and enough for the
+                // lofted geometry to show that it is lofted at all.
+                .init(heightFraction: 0, scale: 1.06),
+                .init(heightFraction: 0.09, scale: 1.0),
+                .init(heightFraction: 0.86, scale: 1.0),
+                .init(heightFraction: 1, scale: 0.92),
+            ]),
             yearBuilt: 1996,
             material: .reinforcedConcrete, system: .momentFrame,
             foundation: .matSlab, soil: .stiffSoil, retrofit: .none,

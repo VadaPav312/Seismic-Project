@@ -31,6 +31,7 @@ struct DeviceControlScreen: View {
             VStack(spacing: Theme.Metrics.spacingLoose) {
                 connectionCard
                 testEarthquake
+                commentaryCard
                 sequenceCard
                 armCard
                 actuatorConsole
@@ -141,6 +142,92 @@ struct DeviceControlScreen: View {
             .disabled(link.isEventRunning || link.state(of: .drill).isInFlight)
 
             CommandStateLabel(state: link.state(of: .drill), command: "DRILL")
+        }
+    }
+
+    // MARK: What the node is doing, in words
+
+    /// The node's own account of itself.
+    ///
+    /// Everything else on this screen is an instrument — states, ratios, a
+    /// timeline — which is the right way to inspect a node and the wrong way to
+    /// *watch* one. Somebody standing over the board while it works wants a
+    /// running account in the order it happens, and this is that: the same
+    /// stream of messages, read a second time in plain English. Newest at the
+    /// bottom, so it reads downwards like a transcript rather than jumping.
+    @ViewBuilder
+    private var commentaryCard: some View {
+        if !link.commentary.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Metrics.s4) {
+                HStack {
+                    SectionLabel("Live commentary", systemImage: "text.bubble")
+                    Spacer()
+                    if link.isEventRunning {
+                        StatusPill(text: "LIVE", tint: Theme.Palette.verdictRed)
+                    }
+                    // Reads back the last few lines rather than the whole feed:
+                    // by the time somebody presses this the interesting part is
+                    // what just happened, and a minute of history read from the
+                    // beginning is a minute during which the node does more.
+                    SpeakButton(link.commentary.suffix(5).map(\.text).joined(separator: " "),
+                                compact: true)
+                }
+
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: Theme.Metrics.s4) {
+                            ForEach(link.commentary) { line in
+                                commentaryLine(line).id(line.id)
+                            }
+                        }
+                        .padding(.vertical, Theme.Metrics.s1)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(height: 260)
+                    .onChange(of: link.commentary.count) { _, _ in
+                        guard let last = link.commentary.last else { return }
+                        withAnimation(Theme.Motion.gentle) {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .instrumentPanel()
+        }
+    }
+
+    private func commentaryLine(_ line: FirmwareNarrator.Line) -> some View {
+        HStack(alignment: .top, spacing: Theme.Metrics.s3) {
+            Circle()
+                .fill(tint(for: line.tone))
+                .frame(width: 7, height: 7)
+                .padding(.top, 7)
+
+            VStack(alignment: .leading, spacing: Theme.Metrics.s1) {
+                Text(line.text)
+                    .font(Theme.Typography.callout)
+                    .foregroundStyle(line.tone == .routine
+                                     ? Theme.Palette.textSecondary
+                                     : Theme.Palette.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if line.isSpoken {
+                    Label("said aloud", systemImage: "speaker.wave.2.fill")
+                        .font(Theme.Typography.label)
+                        .foregroundStyle(Theme.Palette.textGhost)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+    }
+
+    private func tint(for tone: FirmwareNarrator.Tone) -> Color {
+        switch tone {
+        case .routine: Theme.Palette.textGhost
+        case .sensing: Theme.Palette.accent
+        case .acting: Theme.Palette.verdictAmber
+        case .good: Theme.Palette.verdictGreen
+        case .bad: Theme.Palette.verdictRed
         }
     }
 
@@ -759,6 +846,13 @@ struct FirmwareNodeScannerSheet: View {
     @ObservedObject var link: SeismicNodeLink
     @Environment(\.dismiss) private var dismiss
 
+    private static let scanExplanation =
+        "Everything nearby is listed, not only devices advertising the node's service — these "
+        + "serial modules usually advertise a name and nothing else, so a filtered list would be "
+        + "empty next to a node that is working perfectly. Anything that did advertise it is "
+        + "marked and sorted to the top. One tap pairs and remembers it; after that the app "
+        + "reconnects on its own."
+
     var body: some View {
         NavigationStack {
             List {
@@ -766,41 +860,31 @@ struct FirmwareNodeScannerSheet: View {
                     if link.discovered.isEmpty {
                         HStack(spacing: 10) {
                             ProgressView().controlSize(.small)
-                            Text("Scanning for nodes advertising service FFE0…")
+                            Text("Scanning…")
                                 .font(Theme.Typography.callout)
                                 .foregroundStyle(Theme.Palette.textSecondary)
                         }
                     }
-                    ForEach(link.discovered.sorted { $0.rssi > $1.rssi }) { node in
+                    ForEach(link.discovered.sorted { $0.sortKey > $1.sortKey }) { node in
                         Button {
                             link.connect(to: node.id)
                             dismiss()
                         } label: {
-                            HStack {
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(node.name)
-                                        .font(Theme.Typography.callout)
-                                        .foregroundStyle(Theme.Palette.textPrimary)
-                                    Text("\(node.rssi) dBm")
-                                        .font(Theme.Typography.numericSmall)
-                                        .foregroundStyle(Theme.Palette.textTertiary)
-                                }
-                                Spacer()
-                                HStack(spacing: 2) {
-                                    ForEach(1...4, id: \.self) { bar in
-                                        RoundedRectangle(cornerRadius: 1, style: .continuous)
-                                            .fill(bar <= node.signalBars
-                                                  ? Theme.Palette.accent
-                                                  : Theme.Palette.textGhost.opacity(0.3))
-                                            .frame(width: 3, height: CGFloat(bar) * 4 + 3)
-                                    }
-                                }
-                            }
+                            row(for: node)
                         }
+                        .disabled(!node.isConnectable)
                     }
                 } footer: {
-                    Text("One tap pairs and remembers. The app reconnects on its own after "
-                         + "that — on launch, and whenever the node comes back into range.")
+                    Text(Self.scanExplanation)
+                }
+
+                if let fault = link.log.first(where: { $0.kind == .fault }) {
+                    Section("Last problem") {
+                        Text(fault.text)
+                            .font(Theme.Typography.caption)
+                            .foregroundStyle(Theme.Palette.verdictAmber)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             .navigationTitle("Find a node")
@@ -809,8 +893,42 @@ struct FirmwareNodeScannerSheet: View {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { link.stopScanning(); dismiss() }
                 }
+                ToolbarItem(placement: .primaryAction) {
+                    Button("Scan again") { link.startScanning() }
+                }
             }
             .onAppear { link.startScanning() }
+        }
+    }
+
+    private func row(for node: SeismicNodeLink.DiscoveredPeripheral) -> some View {
+        HStack {
+            VStack(alignment: .leading, spacing: 3) {
+                Text(node.name)
+                    .font(Theme.Typography.callout)
+                    .foregroundStyle(Theme.Palette.textPrimary)
+                HStack(spacing: 6) {
+                    Text("\(node.rssi) dBm")
+                        .font(Theme.Typography.numericSmall)
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                    if node.advertisesNodeService {
+                        StatusPill(text: "SERIAL SERVICE", tint: Theme.Palette.accent)
+                    }
+                    if !node.isConnectable {
+                        StatusPill(text: "NOT CONNECTABLE", tint: Theme.Palette.textTertiary)
+                    }
+                }
+            }
+            Spacer()
+            HStack(spacing: 2) {
+                ForEach(1...4, id: \.self) { bar in
+                    RoundedRectangle(cornerRadius: 1, style: .continuous)
+                        .fill(bar <= node.signalBars
+                              ? Theme.Palette.accent
+                              : Theme.Palette.textGhost.opacity(0.3))
+                        .frame(width: 3, height: CGFloat(bar) * 4 + 3)
+                }
+            }
         }
     }
 }

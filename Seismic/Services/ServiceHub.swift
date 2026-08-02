@@ -279,6 +279,23 @@ final class ServiceHub: ObservableObject {
         persistIdentity()
     }
 
+    /// Deletes the account on the server. Local data is not touched here — see
+    /// `AppEnvironment.deleteAccount`, which owns the whole operation.
+    ///
+    /// A guest never reached a server, so there is nothing to delete and
+    /// pretending otherwise would be a lie in the direction that matters.
+    func deleteCloudAccount() async -> CloudService.DeletionOutcome? {
+        guard let account, !account.isGuest else { return nil }
+        return await cloud.deleteAccount()
+    }
+
+    /// Forgets who this is, without touching the server.
+    func forgetIdentity() {
+        account = nil
+        household = nil
+        persistIdentity()
+    }
+
     private(set) var pendingMigration = false
 
     private func queueGuestDataForUpload() {

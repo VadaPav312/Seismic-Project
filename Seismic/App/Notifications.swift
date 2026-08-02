@@ -97,6 +97,11 @@ final class NotificationCentre: NSObject, ObservableObject {
     /// false silently, which would leave a caller believing it had asked.
     @discardableResult
     func requestAuthorisationIfUndecided() async -> Bool {
+        // A screenshot or demonstration run must not be interrupted by a system
+        // alert it has no way to answer. Same escape hatch as
+        // `SEISMIC_SKIP_SIGN_IN`, and it only ever *suppresses* a prompt — there
+        // is no path here that grants anything.
+        if ProcessInfo.processInfo.environment["SEISMIC_SKIP_SIGN_IN"] == "1" { return false }
         await refreshAuthorisation()
         guard authorisation == .notDetermined else { return authorisation == .authorized }
         return await requestAuthorisation()

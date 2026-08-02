@@ -49,6 +49,10 @@ final class AppEnvironment: ObservableObject {
     /// the wrong moment.
     let link = SeismicNodeLink()
 
+    /// The automatic call to emergency services, which never dials anything.
+    /// See `EmergencyCallController` for why.
+    let emergencyCall = EmergencyCallController()
+
     /// How many credentials were found in `.env` at first launch. Surfaced once,
     /// in Settings, and never as a prompt — the app owes the user a working
     /// experience whether or not they ever add a key.
@@ -93,6 +97,13 @@ final class AppEnvironment: ObservableObject {
     }
 
     @Published var isPresentationMode = false
+
+    /// Which presentation to run when `isPresentationMode` turns on.
+    ///
+    /// Separate from the flag so both entry points — the toolbar toggle and the
+    /// full showcase button — drive the same single switch rather than each
+    /// owning a running director.
+    @Published var presentationMode: PresentationDirector.Mode = .brief
 
     /// An event in progress, driving the full-screen takeover.
     struct ActiveEvent: Equatable {
@@ -200,6 +211,23 @@ final class AppEnvironment: ObservableObject {
         self.voice = VoiceController(speech: hub.speech)
         self.sync = SyncEngine(store: store, cloud: hub.cloud) { [weak hub] in hub?.account }
         self.didCompleteOnboarding = UserDefaults.standard.bool(forKey: "didCompleteOnboarding")
+        wireNode()
+    }
+
+    /// Connects the node's own account of itself to the rest of the app.
+    ///
+    /// The link deliberately knows nothing about speech or about events; these
+    /// two closures are the whole of its outward coupling. Set up in `init` so
+    /// they are in place before the first line ever arrives — a node that
+    /// declares an earthquake during launch is not a hypothetical, it is what
+    /// happens when the app is opened after the board has already been shaking.
+    private func wireNode() {
+        link.onSpokenLine = { [weak self] sentence in
+            self?.voice.speak(sentence, urgency: .normal)
+        }
+        link.onDeclaredEvent = { [weak self] isDrill in
+            self?.nodeDeclaredEvent(isDrill: isDrill)
+        }
     }
 
     static func live() -> AppEnvironment {
@@ -288,6 +316,93 @@ final class AppEnvironment: ObservableObject {
         attachSimulatedNode()
         publishWidgetState()
         Haptics.shared.play(.assessmentComplete)
+    }
+
+    // MARK: Leaving
+
+    /// What a sign-out or a deletion actually did.
+    struct AccountExitReport: Equatable {
+        var signedOut = false
+        var localDocumentsRemoved = 0
+        var localRecordingsRemoved = 0
+        var cloudTablesCleared: [String] = []
+        var identityRemovedFromServer = false
+        /// Everything that did not work, in words, ready to be shown.
+        var problems: [String] = []
+
+        var isComplete: Bool { problems.isEmpty }
+    }
+
+    /// Signs out and leaves the data on the device.
+    ///
+    /// Deliberately two separate operations, because they are two separate
+    /// decisions and conflating them is how somebody loses a year of
+    /// measurements by tapping the wrong one. Signing out ends the session; the
+    /// buildings, events and assessments stay exactly where they are and are
+    /// there again at the next sign-in. The UI says so before the tap, not
+    /// after.
+    @discardableResult
+    func signOut() async -> AccountExitReport {
+        var report = AccountExitReport()
+        await services.signOut()
+        report.signedOut = true
+        // The link and any live event belong to the session that just ended.
+        emergencyCall.dismiss()
+        activeEvent = nil
+        return report
+    }
+
+    /// Deletes the account on the server and erases this device.
+    ///
+    /// Order matters and is not interchangeable: the rows go first, then the
+    /// identity, then the device. Deleting the identity first revokes the token
+    /// that authorises the row deletions, which would leave the user's data on
+    /// the server for ever with nobody able to reach it — the exact opposite of
+    /// what they asked for. And the device is erased last so that a server-side
+    /// failure still leaves something to retry from.
+    ///
+    /// Nothing here is claimed on faith. Every step reports what it did, and a
+    /// step that failed is named in the result rather than swallowed, because
+    /// "your account has been deleted" over data that is still on a server is
+    /// the worst sentence this app could print.
+    func deleteAccount() async -> AccountExitReport {
+        var report = AccountExitReport()
+
+        if let outcome = await services.deleteCloudAccount() {
+            report.cloudTablesCleared = outcome.clearedTables
+            report.identityRemovedFromServer = outcome.identityRemoved
+            for (table, reason) in outcome.failures.sorted(by: { $0.key < $1.key }) {
+                report.problems.append("\(table) could not be deleted from the server: \(reason)")
+            }
+            if let reason = outcome.identityFailure {
+                report.problems.append("Your sign-in could not be removed from the server: "
+                                       + "\(reason)")
+            }
+        }
+
+        let erased = store.eraseEverything()
+        report.localDocumentsRemoved = erased.documentsRemoved.count
+        report.localRecordingsRemoved = erased.recordingsRemoved
+        for (file, reason) in erased.failures.sorted(by: { $0.key < $1.key }) {
+            report.problems.append("\(file) could not be removed from this device: \(reason)")
+        }
+
+        services.forgetIdentity()
+        report.signedOut = true
+
+        // Back to a launch-shaped state rather than a half-empty one. Every
+        // published list is cleared explicitly: leaving them populated would
+        // show the deleted buildings until the next launch.
+        emergencyCall.dismiss()
+        activeEvent = nil
+        buildings = []; events = []; assessments = []
+        earthquakes = []; tags = []; observations = []
+        selectedBuildingID = nil
+        didCompleteOnboarding = false
+        UserDefaults.standard.removeObject(forKey: "didCompleteOnboarding")
+        publishWidgetState()
+
+        return report
     }
 
     /// `.env` is read from the app bundle if it was copied in at build time, and
@@ -459,6 +574,50 @@ final class AppEnvironment: ObservableObject {
         timer = nil
     }
 
+    // MARK: The node declaring an event
+
+    /// The board decided, and the phone acts on it.
+    ///
+    /// Two things follow from the node's declaration that do not follow from
+    /// the phone's own detector: the takeover appears even if the phone felt
+    /// nothing (it may be on a desk in the next building), and the automatic
+    /// call to emergency services is placed. The node has the better claim —
+    /// three sensors bolted to the structure against one phone that might be in
+    /// a pocket — so it is allowed to raise the event on its own.
+    private func nodeDeclaredEvent(isDrill: Bool) {
+        if activeEvent == nil {
+            let trigger = link.lastTrigger?.ratio ?? 0
+            activeEvent = ActiveEvent(startedAt: Date(), triggerRatio: trigger,
+                                      estimatedMagnitude: nil,
+                                      secondsUntilStrongShaking: 5,
+                                      expectedIntensity: nil,
+                                      isDrill: isDrill)
+            Haptics.shared.startCountdown(seconds: 5)
+            live.start(buildingName: selectedBuilding?.name ?? "Your building",
+                       secondsUntilShaking: 5, magnitude: nil, intensity: nil, isDrill: isDrill)
+        }
+        placeEmergencyCall()
+    }
+
+    /// Places the (simulated) call to emergency services.
+    ///
+    /// Deliberately not gated on it being a drill. A drill that skipped the
+    /// call would be a drill that never rehearsed the part most likely to go
+    /// wrong — and since nothing is ever dialled, there is no cost to running
+    /// it every time. The banner on the screen is what keeps that honest.
+    func placeEmergencyCall() {
+        guard let event = activeEvent, !emergencyCall.isActive else { return }
+        emergencyCall.onSpeak = { [weak self] sentence in
+            self?.voice.speak(sentence, urgency: .emergency, force: true)
+        }
+        let members = services.household?.members.count
+        let report = EmergencyCallController.report(for: event,
+                                                    building: selectedBuilding,
+                                                    occupied: link.telemetry?.isOccupied,
+                                                    householdSize: members)
+        emergencyCall.place(report: report)
+    }
+
     // MARK: Events
 
     private func beginActiveEvent(ratio: Double, at: Date) {
@@ -506,6 +665,14 @@ final class AppEnvironment: ObservableObject {
                                     + "Drop, cover and hold on.")
         } else {
             voice.announceEmergency("Earthquake detected. Drop, cover and hold on.")
+        }
+
+        // And the call, a beat later — the warning has to be heard first, and
+        // an automated report read over the top of "drop, cover and hold on" is
+        // two voices saying different things at the worst possible moment.
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(6))
+            self?.placeEmergencyCall()
         }
     }
 

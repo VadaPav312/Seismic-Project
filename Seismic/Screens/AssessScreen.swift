@@ -420,10 +420,12 @@ struct AssessScreen: View {
                     SkeletonBlock(height: 12, width: 220)
                 }
             } else {
-                Text(generated?.value.text ?? assessment.narrative)
+                let paragraph = generated?.value.text ?? assessment.narrative
+                Text(paragraph)
                     .font(Theme.Typography.body)
                     .foregroundStyle(Theme.Palette.textPrimary)
                     .fixedSize(horizontal: false, vertical: true)
+                    .readAloud(paragraph, alignment: .bottomTrailing)
             }
 
             // When a model produced a figure nobody measured, the answer is

@@ -211,28 +211,14 @@ struct NavigationBloom: View {
     /// defaulted to the first item: one tile lit for no reason reads as a bug.
     @State private var focus: Int?
 
-    /// Stretches the arc vertically only, so it is not cramped top-to-bottom.
-    /// The horizontal budget ignores it, which is the whole point — width is
-    /// what runs out first on a phone, and stretching that would push the
-    /// outermost tiles off the screen.
-    private let verticalStretch: CGFloat = 1.5
-
-    /// How far above the orb the arc is centred.
-    ///
-    /// Centring it exactly on the orb puts the two end tiles level with the
-    /// dock, which then sits on top of their labels. Lifting the whole fan by
-    /// rather less than a tile clears that without the arc looking detached
-    /// from the button it came out of.
-    private let liftAboveOrb: CGFloat = 20
-
     var body: some View {
         ZStack {
             scrim
             GeometryReader { proxy in
                 let origin = CGPoint(
                     x: proxy.size.width / 2,
-                    y: proxy.size.height - OrbDock.orbCentreFromBottom - liftAboveOrb)
-                let radius = ringRadius(in: proxy.size)
+                    y: proxy.size.height - OrbDock.orbCentreFromBottom)
+                let plan = Layout(count: items.count, size: proxy.size)
                 ZStack {
                     // Only just enough spacing for two tiles that end up nearly
                     // touching to fuse at the edges. More than this and the
@@ -241,7 +227,7 @@ struct NavigationBloom: View {
                         ForEach(Array(items.enumerated()), id: \.element) { index, section in
                             tile(section, index: index)
                                 .position(origin)
-                                .offset(isOpen ? placement(index: index, radius: radius) : .zero)
+                                .offset(isOpen ? plan.offset(of: index) : .zero)
                                 .animation(entrance(index: index), value: isOpen)
                         }
                     }
@@ -253,7 +239,7 @@ struct NavigationBloom: View {
                 .gesture(
                     DragGesture(minimumDistance: 14)
                         .onChanged { value in
-                            updateFocus(towards: value.location, from: origin, radius: radius)
+                            updateFocus(towards: value.location, from: origin, plan: plan)
                         }
                         .onEnded { _ in
                             if let focus, items.indices.contains(focus) {
@@ -345,81 +331,121 @@ struct NavigationBloom: View {
 
     // MARK: Geometry
 
-    /// The fan's width in degrees. Wider for more items, and capped well short
-    /// of a half-circle: an item level with the orb is one your thumb has to
-    /// travel sideways to reach, which is the slowest direction there is, and
-    /// it is also the one place the dock is in the way.
-    private var span: Double { min(140, 50 + Double(items.count) * 12) }
-
-    /// Alternate items sit closer in. One arc of nine tiles does not fit across
-    /// a phone: the angle between neighbours works out at about fifty points of
-    /// arc, and a tile is forty-four wide before its label. Pulling every other
-    /// one inwards roughly doubles the gap between neighbours without needing a
-    /// single extra point of width — which is the dimension that ran out.
+    /// Where every tile goes.
     ///
-    /// Only worth doing when there are enough items to crowd. Below that a
-    /// staggered arc just looks like a wonky one.
-    private var isStaggered: Bool { items.count > 6 }
-
-    /// Even indices stay on the outer arc — which puts both ends and the top of
-    /// the fan there, so its silhouette is still an arc rather than a zigzag
-    /// with a notch cut out of the middle of it.
-    private func tierScale(_ index: Int) -> CGFloat {
-        guard isStaggered, !index.isMultiple(of: 2) else { return 1 }
-        return 0.68
-    }
-
-    /// The largest radius that keeps the outermost tile fully on screen with
-    /// clear air at the edges, floored so a small fan on a wide screen does not
-    /// collapse into a cramped little ring.
-    private func ringRadius(in size: CGSize) -> CGFloat {
-        let halfSpan = (span / 2) * .pi / 180
-        let width = min(size.width, 560)
-        // The outermost tile's centre reaches R·sin(halfSpan) horizontally, so
-        // the budget is half the width, less a margin. The margin is measured
-        // against the *label*, not the tile: the label is the wider of the two,
-        // and it is the one that reads as broken when it touches the bezel.
-        let margin = OrbDock.bloomLabelWidth / 2 + 10
-        let byWidth = (width / 2 - margin) / CGFloat(max(sin(halfSpan), 0.05))
-        let byHeight = (size.height - 150) / verticalStretch
-        return max(146, min(byWidth, byHeight, 260))
-    }
-
-    /// Where item `index` sits, as an offset from the orb. Angles run from the
-    /// left end of the fan to the right, measured the usual way (0° is east,
-    /// 90° is straight up), so the arc is centred on straight-up.
-    private func placement(index: Int, radius: CGFloat) -> CGSize {
-        let radians = angle(forIndex: index) * .pi / 180
-        let r = radius * tierScale(index)
-        return CGSize(width: cos(radians) * r,
-                      height: -sin(radians) * r * verticalStretch)
-    }
-
-    /// The angle item `index` sits at, in degrees, 90° being straight up.
-    private func angle(forIndex index: Int) -> Double {
-        guard items.count > 1 else { return 90 }
-        let start = 90 + span / 2
-        let end = 90 - span / 2
-        return start + (end - start) * (Double(index) / Double(items.count - 1))
-    }
-
-    /// Maps a finger position to the nearest item on the arc.
+    /// This was a single arc, and a single arc is wrong past about six items.
+    /// The radius that keeps the outermost tile on screen is set by the phone's
+    /// *width*, and once that is fixed the gap between neighbours is just the
+    /// radius times the angle between them — which with eleven sections came out
+    /// at around forty points, against a tile forty-four wide and a label
+    /// sixty-four. So they overlapped, and no amount of stretching the arc
+    /// vertically fixed it, because vertical stretch does not change the spacing
+    /// between two tiles near the top of the arc where the arc is horizontal.
+    /// Widening the fan made it worse, not better: more angle at a smaller
+    /// radius is the same arc length.
     ///
-    /// Compared by angle rather than by distance, so a sweep that falls short of
-    /// the ring still selects — the direction is what the user meant, and
-    /// insisting they reach the exact radius would make the gesture feel broken
-    /// on a large phone held one-handed.
-    private func updateFocus(towards point: CGPoint, from origin: CGPoint, radius: CGFloat) {
+    /// Rows solve it outright, because the spacing stops being derived and
+    /// becomes something chosen. Each row is bowed so the ends sit slightly
+    /// lower than the middle, which keeps the silhouette of something fanning
+    /// out of the orb rather than a grid dropped on top of it, and the rows
+    /// climb the screen — which is where all the free space was.
+    struct Layout {
+        let rowSizes: [Int]
+        let columnPitch: CGFloat
+        let rowPitch: CGFloat
+        let firstRowLift: CGFloat
+        let bow: CGFloat
+
+        /// At most four across: five fits the tiles on a large phone and not
+        /// their labels, and a layout that is right on a Pro Max and broken on
+        /// a mini is a layout that is broken.
+        static let maximumPerRow = 4
+
+        init(count: Int, size: CGSize) {
+            // Rows are built full-width first and then reversed, so the short
+            // row ends up at the *bottom*. That puts the widest part of the fan
+            // furthest from the orb, which is the shape a bloom has, and it
+            // keeps the first few items — the ones reached most often — nearest
+            // the thumb.
+            var sizes: [Int] = []
+            var remaining = count
+            while remaining > 0 {
+                let take = min(Self.maximumPerRow, remaining)
+                sizes.append(take)
+                remaining -= take
+            }
+            rowSizes = sizes.reversed()
+
+            let widest = CGFloat(sizes.max() ?? 1)
+            // The label is the wider of tile and label, and it is the one that
+            // reads as broken when two of them touch.
+            let usable = min(size.width, 460) - 28
+            columnPitch = max(OrbDock.bloomLabelWidth + 10,
+                              min(96, usable / max(widest, 1)))
+
+            // A row is a tile plus its label plus air, and then as much more air
+            // as the screen will give — the fan climbs into the empty two
+            // thirds above the dock rather than crouching over it. Compressed
+            // when there are more rows than a short phone has room for, rather
+            // than running the top row off under the hint.
+            let rows = CGFloat(rowSizes.count)
+            let available = size.height - OrbDock.orbCentreFromBottom - 150
+            rowPitch = max(96, min(148, available / max(rows, 1)))
+            firstRowLift = 118
+            bow = 16
+        }
+
+        /// The row and column `index` falls in, counting rows from the bottom.
+        func position(of index: Int) -> (row: Int, column: Int, rowSize: Int) {
+            var remaining = index
+            for (row, size) in rowSizes.enumerated() {
+                if remaining < size { return (row, remaining, size) }
+                remaining -= size
+            }
+            let last = rowSizes.count - 1
+            return (max(last, 0), 0, rowSizes.last ?? 1)
+        }
+
+        /// Where item `index` sits, as an offset from the orb's centre.
+        func offset(of index: Int) -> CGSize {
+            let (row, column, rowSize) = position(of: index)
+            let centred = CGFloat(column) - CGFloat(rowSize - 1) / 2
+            let x = centred * columnPitch
+
+            // The ends of a row dip, by an amount that grows with how far from
+            // the middle they are. Quadratic rather than circular because it is
+            // the same shape to the eye at this scale and does not need the row
+            // to know a radius.
+            let half = max(CGFloat(rowSize - 1) / 2, 0.5)
+            let dip = bow * pow(centred / half, 2)
+
+            let y = -(firstRowLift + CGFloat(row) * rowPitch) + dip
+            return CGSize(width: x, height: y)
+        }
+    }
+
+    /// Maps a finger position to the nearest tile.
+    ///
+    /// Nearest by distance now that the tiles are on a grid rather than a ring —
+    /// but with the vertical axis weighted, because a thumb sweeping upward
+    /// crosses rows quickly and a small wobble sideways should not jump columns
+    /// while it does.
+    private func updateFocus(towards point: CGPoint, from origin: CGPoint, plan: Layout) {
         let dx = point.x - origin.x
-        let dy = (point.y - origin.y) / verticalStretch
+        let dy = point.y - origin.y
         guard hypot(dx, dy) > 44 else { return }
-        let bearing = atan2(-dy, dx) * 180 / .pi
+
         let nearest = items.indices.min { a, b in
-            abs(bearing - angle(forIndex: a)) < abs(bearing - angle(forIndex: b))
+            distance(from: dx, dy, to: plan.offset(of: a))
+                < distance(from: dx, dy, to: plan.offset(of: b))
         }
         guard nearest != focus else { return }
         focus = nearest
         Haptics.shared.play(.selection)
+    }
+
+    private func distance(from dx: CGFloat, _ dy: CGFloat, to offset: CGSize) -> CGFloat {
+        hypot(dx - offset.width, (dy - offset.height) * 0.8)
     }
 
     /// Items arrive one after another rather than together. Thirty milliseconds

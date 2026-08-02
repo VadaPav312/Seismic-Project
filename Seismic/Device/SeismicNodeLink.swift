@@ -59,6 +59,25 @@ final class SeismicNodeLink: NSObject, ObservableObject {
     @Published private(set) var log: [LogEntry] = []
     @Published private(set) var discovered: [DiscoveredPeripheral] = []
 
+    /// The same stream, in words.
+    ///
+    /// Newest last, so the feed reads downwards like a transcript. The
+    /// instrument panels below it are the authority; this is what somebody
+    /// watching the board work actually follows.
+    @Published private(set) var commentary: [FirmwareNarrator.Line] = []
+
+    /// Called with the handful of lines that warrant being said out loud.
+    ///
+    /// A closure rather than a reference to the voice controller, because the
+    /// link has no business knowing that speech exists — and because a test can
+    /// then assert on exactly which sentences would have been spoken.
+    var onSpokenLine: ((String) -> Void)?
+
+    /// Called once, the moment the node declares an event, with whether it is a
+    /// drill. The app answers this by warning the household and placing the
+    /// automatic emergency call.
+    var onDeclaredEvent: ((Bool) -> Void)?
+
     /// Per-command state, so no button is ever left in an unknown state.
     @Published private(set) var commandState: [String: CommandState] = [:]
 
@@ -112,6 +131,17 @@ final class SeismicNodeLink: NSObject, ObservableObject {
         var name: String
         var rssi: Int
         var lastSeen: Date
+        /// Whether FFE0 appeared in the advertisement itself.
+        ///
+        /// Not a requirement, only a hint. The serial modules these boards use
+        /// very often advertise nothing but a local name and expose FFE0 only
+        /// once you have connected and read the GATT table, so a list that
+        /// showed just the peripherals advertising it would frequently be
+        /// empty while the node sat there advertising happily.
+        var advertisesNodeService = false
+        /// False when the advertisement explicitly says so, which is the one
+        /// case where tapping it can only ever fail.
+        var isConnectable = true
 
         /// Four bars from RSSI. Shown because "connect to the strongest one" is
         /// the only guidance that helps in a room with three boards on the
@@ -124,6 +154,10 @@ final class SeismicNodeLink: NSObject, ObservableObject {
             default: 1
             }
         }
+
+        /// Ranks the list: nodes that advertised the service first, then by
+        /// signal. A board that named itself is almost always the one wanted.
+        var sortKey: Int { (advertisesNodeService ? 10_000 : 0) + rssi }
     }
 
     /// Where a command has got to.
@@ -144,6 +178,7 @@ final class SeismicNodeLink: NSObject, ObservableObject {
 
     private let assembler = FirmwareRecordingAssembler()
     private let queue = FirmwareActuationQueue()
+    private var narrator = FirmwareNarrator()
     private var simulator: FirmwareSimulator?
     private var tickTimer: AnyCancellable?
 
@@ -161,8 +196,36 @@ final class SeismicNodeLink: NSObject, ObservableObject {
     /// Incoming bytes that have not yet formed a whole line.
     private var incomingBuffer = Data()
 
+    /// Strong references to everything the scan turned up.
+    ///
+    /// CoreBluetooth does not retain the peripherals it hands to
+    /// `didDiscover`; if nothing else holds one it is deallocated, and
+    /// `retrievePeripherals(withIdentifiers:)` then cannot return it. Keeping
+    /// only a UUID and asking for the object back later is the single most
+    /// common way a scan list ends up full of nodes that all report
+    /// "no longer visible" the moment they are tapped.
+    private var discoveredPeripherals: [UUID: CBPeripheral] = [:]
+
+    private var scanTimeoutTask: Task<Void, Never>?
+    private var signalTask: Task<Void, Never>?
+
     static let serviceUUID = CBUUID(string: "FFE0")
     static let characteristicUUID = CBUUID(string: "FFE1")
+
+    /// The serial services these modules actually ship with.
+    ///
+    /// FFE0/FFE1 is what the HM-10 and its clones use and what `arduino.ino`
+    /// is written against, but the same firmware behind a Nordic UART module
+    /// speaks exactly the same newline-delimited protocol over a different
+    /// UUID. Preferring FFE0 and accepting the others costs nothing and means
+    /// the app is not defeated by which module happened to be in the drawer.
+    static let knownSerialServices: [CBUUID] = [
+        CBUUID(string: "FFE0"),
+        CBUUID(string: "FFE1"),
+        CBUUID(string: "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"),   // Nordic UART
+        CBUUID(string: "0000FFE0-0000-1000-8000-00805F9B34FB"),   // some stacks report long form
+        CBUUID(string: "49535343-FE7D-4AE5-8FA9-9FAFD205E455"),   // Microchip RN4870
+    ]
     #endif
 
     /// The peripheral to reconnect to without being asked.
@@ -227,6 +290,8 @@ final class SeismicNodeLink: NSObject, ObservableObject {
         assembler.reset()
         awaitingAck = [:]
         recoveryRounds = 0
+        commentary = []
+        narrator.reset()
     }
 
     // MARK: Receiving
@@ -236,6 +301,18 @@ final class SeismicNodeLink: NSObject, ObservableObject {
         guard let message = Firmware.parse(line: line) else { return }
         append(line, kind: .incoming)
         apply(message)
+        narrate(message)
+    }
+
+    /// The plain-English second reading of the same message.
+    private func narrate(_ message: Firmware.Message) {
+        let lines = narrator.narrate(message)
+        guard !lines.isEmpty else { return }
+        commentary.append(contentsOf: lines)
+        if commentary.count > 120 { commentary.removeFirst(commentary.count - 120) }
+        for line in lines where line.isSpoken {
+            onSpokenLine?(line.text)
+        }
     }
 
     private func apply(_ message: Firmware.Message) {
@@ -279,6 +356,7 @@ final class SeismicNodeLink: NSObject, ObservableObject {
             lastTrigger = Trigger(ratio: ratio, votes: votes, isDrill: isDrill, at: Date())
             assessment = nil
             Haptics.shared.play(.eventTriggered)
+            onDeclaredEvent?(isDrill)
 
         case .countdown(let remaining):
             countdown = remaining
@@ -436,7 +514,18 @@ final class SeismicNodeLink: NSObject, ObservableObject {
             // ignored, and only one of those is the app's problem to report.
             let type: CBCharacteristicWriteType =
                 characteristic.properties.contains(.write) ? .withResponse : .withoutResponse
-            peripheral.writeValue(command.payload, for: characteristic, type: type)
+            // Split to the negotiated MTU. These modules commonly cap a write
+            // at twenty bytes, and a longer one is not truncated — it is
+            // rejected outright, so `TUNE:` would silently never arrive.
+            let limit = max(peripheral.maximumWriteValueLength(for: type), 20)
+            let payload = command.payload
+            var offset = payload.startIndex
+            while offset < payload.endIndex {
+                let end = payload.index(offset, offsetBy: limit, limitedBy: payload.endIndex)
+                    ?? payload.endIndex
+                peripheral.writeValue(payload[offset..<end], for: characteristic, type: type)
+                offset = end
+            }
             #endif
         }
     }
@@ -524,46 +613,114 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         tickTimer?.cancel()
         simulator = nil
         discovered = []
+        discoveredPeripherals = [:]
+        connection = .scanning
         if central == nil {
-            central = CBCentralManager(delegate: self, queue: .main)
+            // Created lazily rather than at launch, so the system permission
+            // prompt appears when somebody has asked to find a node instead of
+            // on the first run of an app they have not yet used.
+            central = CBCentralManager(delegate: self, queue: .main,
+                                       options: [CBCentralManagerOptionShowPowerAlertKey: true])
         } else if central?.state == .poweredOn {
             beginScan()
+        } else if let state = central?.state {
+            reportUnavailable(state)
         }
-        connection = .scanning
     }
 
     func stopScanning() {
+        scanTimeoutTask?.cancel()
         central?.stopScan()
+        if case .scanning = connection { connection = .disconnected }
     }
 
     private func beginScan() {
-        // Filtered by the service, so a room full of unrelated peripherals does
-        // not fill the list. Duplicates are allowed through because RSSI is
-        // only useful if it updates.
-        central?.scanForPeripherals(withServices: [Self.serviceUUID],
+        // Unfiltered, deliberately.
+        //
+        // Scanning `withServices: [FFE0]` matches only against the service
+        // UUIDs in the *advertisement*, and the serial modules these boards
+        // use very often advertise nothing but a local name — FFE0 exists only
+        // in the GATT table, which cannot be read until after connecting. A
+        // filtered scan therefore shows an empty list next to a node that is
+        // advertising perfectly well, and there is no way to tell from the
+        // phone that anything is wrong. Everything is listed instead, with the
+        // ones that did advertise the service ranked to the top.
+        discovered = []
+        central?.scanForPeripherals(withServices: nil,
                                     options: [CBCentralManagerScanOptionAllowDuplicatesKey: true])
+        note("Scanning. Everything nearby is listed, because these serial modules usually "
+             + "advertise only a name — the node's service is not visible until after "
+             + "connecting. Anything that did advertise it is marked and sorted first.")
+
+        scanTimeoutTask?.cancel()
+        scanTimeoutTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(20))
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard let self, case .scanning = self.connection else { return }
+                // Duplicates are allowed through so RSSI stays live, which is
+                // expensive to leave running. Twenty seconds is long enough to
+                // find a board on the same bench.
+                self.central?.stopScan()
+                if self.discovered.isEmpty {
+                    self.fault("Twenty seconds of scanning found nothing at all. The board is "
+                               + "either unpowered, out of range, or its BLE module is not "
+                               + "advertising — check that the module's LED is blinking rather "
+                               + "than solid, which means it is already paired to something else.")
+                } else {
+                    self.note("Scan stopped after twenty seconds to save power. "
+                              + "\(self.discovered.count) device\(self.discovered.count == 1 ? "" : "s") "
+                              + "found. Tap Scan again to refresh.")
+                }
+            }
+        }
     }
 
     /// Connects to a discovered node and remembers it.
     func connect(to id: UUID) {
         guard let central else { return }
-        let known = central.retrievePeripherals(withIdentifiers: [id])
-        guard let target = known.first else {
-            fault("That node is no longer visible. Scan again.")
+        // The strong reference first, because it is the one that is reliably
+        // there. `retrievePeripherals` is the fallback for a node remembered
+        // across launches, which this session never discovered.
+        let target = discoveredPeripherals[id]
+            ?? central.retrievePeripherals(withIdentifiers: [id]).first
+        guard let target else {
+            fault("That node is no longer visible to the system. Scan again.")
             return
         }
+        scanTimeoutTask?.cancel()
         resetState()
         source = .bluetooth
         rememberedIdentifier = id
+        reconnectAttempt = 0
         peripheral = target
         target.delegate = self
-        connection = .connecting(attempt: reconnectAttempt + 1)
+        connection = .connecting(attempt: 1)
         central.stopScan()
-        central.connect(target)
+        note("Connecting to \(target.name ?? "the node").")
+        // Ten seconds, because CoreBluetooth's own connect has no timeout at
+        // all: a board that is powered but wedged leaves this spinning for
+        // ever with nothing on screen to say so.
+        central.connect(target, options: [CBConnectPeripheralOptionNotifyOnDisconnectionKey: true])
+        watchForConnectTimeout()
+    }
+
+    private func watchForConnectTimeout() {
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(10))
+            await MainActor.run {
+                guard let self, case .connecting = self.connection else { return }
+                self.fault("No answer in ten seconds. CoreBluetooth keeps trying indefinitely, "
+                           + "so this is the app giving up rather than the radio. The usual "
+                           + "cause is the module being connected to something else already.")
+            }
+        }
     }
 
     func disconnect() {
         reconnectTask?.cancel()
+        scanTimeoutTask?.cancel()
+        signalTask?.cancel()
         rememberedIdentifier = nil
         if let peripheral { central?.cancelPeripheralConnection(peripheral) }
         teardownBluetooth()
@@ -572,10 +729,38 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     private func teardownBluetooth() {
         reconnectTask?.cancel()
+        scanTimeoutTask?.cancel()
+        signalTask?.cancel()
         central?.stopScan()
         peripheral = nil
         characteristic = nil
         incomingBuffer = Data()
+    }
+
+    /// Says why Bluetooth cannot be used, in terms of what to do about it.
+    private func reportUnavailable(_ state: CBManagerState) {
+        switch state {
+        case .poweredOff:
+            connection = .disconnected
+            fault("Bluetooth is switched off. Turn it on in Control Centre or Settings.")
+        case .unauthorized:
+            connection = .disconnected
+            fault("This app is not allowed to use Bluetooth. Settings → Privacy & Security → "
+                  + "Bluetooth, and enable Seismic.")
+        case .unsupported:
+            connection = .disconnected
+            // The Simulator, almost always. Worth naming, because the symptom
+            // otherwise is a scan that finds nothing and explains nothing.
+            fault("This device has no Bluetooth LE radio. If this is the iOS Simulator, that "
+                  + "is expected — the Simulator has no Bluetooth at all. Use the simulated "
+                  + "node here and the real one on a phone.")
+        case .resetting:
+            note("The Bluetooth stack is restarting. This resolves itself in a moment.")
+        case .unknown:
+            break
+        @unknown default:
+            break
+        }
     }
 
     // MARK: Central delegate
@@ -588,21 +773,17 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
                 // back into range should not need a tap.
                 if let remembered = rememberedIdentifier,
                    let known = central.retrievePeripherals(withIdentifiers: [remembered]).first {
+                    discoveredPeripherals[remembered] = known
                     peripheral = known
                     known.delegate = self
                     connection = .connecting(attempt: 1)
                     central.connect(known)
+                    watchForConnectTimeout()
                 } else if source == .bluetooth {
                     beginScan()
                 }
-            case .poweredOff:
-                connection = .disconnected
-                fault("Bluetooth is switched off.")
-            case .unauthorized:
-                connection = .disconnected
-                fault("This app is not allowed to use Bluetooth. Settings → Privacy.")
             default:
-                break
+                reportUnavailable(central.state)
             }
         }
     }
@@ -611,17 +792,36 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
                                     didDiscover peripheral: CBPeripheral,
                                     advertisementData: [String: Any],
                                     rssi RSSI: NSNumber) {
+        let advertised = (advertisementData[CBAdvertisementDataServiceUUIDsKey] as? [CBUUID]) ?? []
+        let overflow =
+            (advertisementData[CBAdvertisementDataOverflowServiceUUIDsKey] as? [CBUUID]) ?? []
+        let isNode = (advertised + overflow).contains { Self.knownSerialServices.contains($0) }
+        // The local name from the advertisement, then the cached name, then
+        // nothing — and an unnamed peripheral is still listed, because an
+        // unconfigured module advertises no name at all and is exactly the one
+        // somebody is trying to find.
         let name = (advertisementData[CBAdvertisementDataLocalNameKey] as? String)
-            ?? peripheral.name ?? "Seismic node"
+            ?? peripheral.name ?? "Unnamed device"
+        let connectable =
+            (advertisementData[CBAdvertisementDataIsConnectable] as? NSNumber)?.boolValue ?? true
         let id = peripheral.identifier
         let rssi = RSSI.intValue
         Task { @MainActor in
+            // Held strongly, or CoreBluetooth deallocates it and connecting
+            // later becomes impossible.
+            self.discoveredPeripherals[id] = peripheral
             if let index = discovered.firstIndex(where: { $0.id == id }) {
+                // RSSI only; the name is not overwritten, because a duplicate
+                // advertisement often omits it and the entry would flicker
+                // between its name and "Unnamed device".
                 discovered[index].rssi = rssi
                 discovered[index].lastSeen = Date()
+                if isNode { discovered[index].advertisesNodeService = true }
             } else {
                 discovered.append(DiscoveredPeripheral(id: id, name: name, rssi: rssi,
-                                                       lastSeen: Date()))
+                                                       lastSeen: Date(),
+                                                       advertisesNodeService: isNode,
+                                                       isConnectable: connectable))
             }
         }
     }
@@ -631,14 +831,50 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         Task { @MainActor in
             reconnectAttempt = 0
             connection = .connected(rssi: -60)
-            peripheral.discoverServices([Self.serviceUUID])
+            note("Connected. Reading the node's services.")
+            // Everything, not just FFE0. Asking for one UUID and finding it
+            // absent produces silence; asking for all of them means the app
+            // can say which service it *did* find, which is the difference
+            // between a fixable problem and a dead screen.
+            peripheral.discoverServices(nil)
+            peripheral.readRSSI()
+            startWatchingSignal()
+        }
+    }
+
+    /// Keeps the reported signal strength honest.
+    ///
+    /// `didConnect` has no RSSI of its own, so without this the badge shows a
+    /// made-up −60 for the entire session and "weak signal" never appears —
+    /// on a link whose most common failure is exactly that.
+    private func startWatchingSignal() {
+        signalTask?.cancel()
+        signalTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(3))
+                await MainActor.run { self?.peripheral?.readRSSI() }
+            }
+        }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral,
+                                didReadRSSI RSSI: NSNumber,
+                                error: Error?) {
+        let rssi = RSSI.intValue
+        Task { @MainActor in
+            guard self.characteristic != nil || self.connection.isLive else { return }
+            self.connection = rssi < -85 ? .weakSignal(rssi: rssi) : .connected(rssi: rssi)
         }
     }
 
     nonisolated func centralManager(_ central: CBCentralManager,
                                     didFailToConnect peripheral: CBPeripheral,
                                     error: Error?) {
-        Task { @MainActor in scheduleReconnect() }
+        let reason = error?.localizedDescription
+        Task { @MainActor in
+            self.fault("Could not connect" + (reason.map { ": \($0)" } ?? "."))
+            self.scheduleReconnect()
+        }
     }
 
     nonisolated func centralManager(_ central: CBCentralManager,
@@ -646,6 +882,8 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
                                     error: Error?) {
         Task { @MainActor in
             characteristic = nil
+            signalTask?.cancel()
+            incomingBuffer = Data()
             // The node keeps running and keeps its recording. Said plainly,
             // because the instinct on seeing a dropped link mid-event is to
             // assume the event was lost.
@@ -686,32 +924,125 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     nonisolated func peripheral(_ peripheral: CBPeripheral,
                                 didDiscoverServices error: Error?) {
-        guard let service = peripheral.services?.first(where: { $0.uuid == Self.serviceUUID })
-        else { return }
-        peripheral.discoverCharacteristics([Self.characteristicUUID], for: service)
+        if let error {
+            Task { @MainActor in
+                self.fault("Could not read the node's services: \(error.localizedDescription)")
+            }
+            return
+        }
+        let services = peripheral.services ?? []
+        guard !services.isEmpty else {
+            Task { @MainActor in
+                self.fault("The node connected but exposes no services at all. That is a module "
+                           + "in command mode rather than transparent mode — it needs AT+ROLE0 "
+                           + "and a power cycle.")
+            }
+            return
+        }
+        // Serial services first, then everything else. Discovering all the
+        // characteristics of every service costs one round trip each and means
+        // an unrecognised module still works, so long as it has something that
+        // can notify and something that can be written.
+        let ordered = services.sorted { a, b in
+            Self.knownSerialServices.contains(a.uuid) && !Self.knownSerialServices.contains(b.uuid)
+        }
+        for service in ordered {
+            peripheral.discoverCharacteristics(nil, for: service)
+        }
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral,
                                 didDiscoverCharacteristicsFor service: CBService,
                                 error: Error?) {
-        guard let found = service.characteristics?
-            .first(where: { $0.uuid == Self.characteristicUUID }) else { return }
-        peripheral.setNotifyValue(true, for: found)
+        let characteristics = service.characteristics ?? []
+        // FFE1 by name if it is there. Otherwise anything that can both stream
+        // and be written to, which is what the protocol actually requires —
+        // the UUID is a convention, the properties are the contract.
+        let named = characteristics.first { $0.uuid == Self.characteristicUUID }
+        let capable = characteristics.first { candidate in
+            let canStream = candidate.properties.contains(.notify)
+                || candidate.properties.contains(.indicate)
+            let canWrite = candidate.properties.contains(.write)
+                || candidate.properties.contains(.writeWithoutResponse)
+            return canStream && canWrite
+        }
+        guard let found = named ?? capable else { return }
+
         Task { @MainActor in
+            // The first workable service wins; later ones arrive afterwards
+            // and must not displace a link that is already streaming.
+            guard self.characteristic == nil else { return }
             self.characteristic = found
-            self.note("Connected. Asking the node for its state.")
+            peripheral.setNotifyValue(true, for: found)
+            if found.uuid == Self.characteristicUUID {
+                self.note("Link open on FFE1. Asking the node for its state.")
+            } else {
+                self.note("This module does not use FFE1, so the link is open on "
+                          + "\(found.uuid.uuidString) instead — it notifies and accepts writes, "
+                          + "which is all the protocol needs.")
+            }
             // The node only sends telemetry once a second; asking immediately
             // means the screen is populated before the first tick rather than
             // a second after it.
             self.send(.status)
+            self.confirmTrafficArrives()
+        }
+    }
+
+    /// Checks that the link carries traffic, not merely that it exists.
+    ///
+    /// A connected peripheral with notifications enabled and a characteristic
+    /// that never fires looks, on every status display, exactly like a working
+    /// node during a quiet moment. The node sends telemetry every second, so
+    /// four seconds of silence is a real fault and worth naming — it is almost
+    /// always a module wired to the wrong serial port, or one whose baud rate
+    /// does not match the sketch's 9600.
+    private func confirmTrafficArrives() {
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(4))
+            await MainActor.run {
+                guard let self, self.characteristic != nil, self.telemetry == nil else { return }
+                self.fault("Connected, but the node has sent nothing in four seconds — it should "
+                           + "send telemetry every second. The link is fine; the board is not "
+                           + "talking. Check the module is on Serial1 and that its baud rate "
+                           + "matches the 9600 in the sketch.")
+            }
+        }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral,
+                                didWriteValueFor characteristic: CBCharacteristic,
+                                error: Error?) {
+        guard let error else { return }
+        Task { @MainActor in
+            self.fault("A command was not accepted by the node: \(error.localizedDescription)")
         }
     }
 
     nonisolated func peripheral(_ peripheral: CBPeripheral,
                                 didUpdateValueFor characteristic: CBCharacteristic,
                                 error: Error?) {
+        if let error {
+            Task { @MainActor in
+                self.fault("The node's stream reported an error: \(error.localizedDescription)")
+            }
+            return
+        }
         guard let data = characteristic.value else { return }
         Task { @MainActor in self.consume(data) }
+    }
+
+    nonisolated func peripheral(_ peripheral: CBPeripheral,
+                                didUpdateNotificationStateFor characteristic: CBCharacteristic,
+                                error: Error?) {
+        guard let error else { return }
+        Task { @MainActor in
+            // Without notifications the link is one-way: commands go out and
+            // nothing ever comes back, which reads on screen as a node that
+            // has stopped rather than a subscription that failed.
+            self.fault("Could not subscribe to the node's stream: \(error.localizedDescription). "
+                       + "Commands will still be sent but nothing will be received.")
+        }
     }
 
     /// Reassembles lines from whatever the radio hands over.

@@ -15,6 +15,10 @@ struct HomeScreen: View {
     @State private var showingCheckIn = false
     @State private var showingImport = false
 
+    private static let baselineExplanation =
+        "No event has been recorded for this building yet, so there is nothing to assess. "
+        + "The baseline above is what any future assessment will be compared against."
+
     var body: some View {
         ScrollView {
             LazyVStack(spacing: Theme.Metrics.spacingLoose) {
@@ -145,12 +149,11 @@ struct HomeScreen: View {
                         size: .medium),
             ], columns: 2)
 
-            Text("No event has been recorded for this building yet, so there is nothing to "
-                 + "assess. The baseline above is what any future assessment will be compared "
-                 + "against.")
+            Text(Self.baselineExplanation)
                 .font(Theme.Typography.caption)
                 .foregroundStyle(Theme.Palette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
+                .readAloud(Self.baselineExplanation, alignment: .bottomTrailing)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .instrumentPanel()

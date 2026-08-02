@@ -108,4 +108,83 @@ final class PlanShapeTests: XCTestCase {
             XCTAssertNil(PlanShape.parse(text), "\(text.debugDescription) should not match")
         }
     }
+
+
+    // MARK: Rounded plans
+
+    /// Rounding removes area, so the generator has to put it back.
+    ///
+    /// This is the failure the shape was most likely to have: a rounded square
+    /// built by cutting corners off a square of the right size encloses about
+    /// six per cent less than it claims, and that six per cent would come
+    /// straight off the building's mass and lengthen its computed period.
+    func testRoundedPlansStillEncloseTheAreaTheyClaim() {
+        for shape in [PlanShape.roundedSquare, .roundedTriangular] {
+            for target in [120.0, 620.0, 2320.0] {
+                let ring = shape.polygon(area: target)
+                XCTAssertEqual(area(ring), target, accuracy: target * 0.01,
+                               "\(shape.rawValue) at \(target) m²")
+            }
+        }
+    }
+
+    /// A rounded square is not a square.
+    ///
+    /// Asserted by counting corners rather than by eye: a square has four
+    /// vertices where the direction changes sharply, and a rounded one has
+    /// none — every turn is spread over an arc. Without this the shape could
+    /// silently degrade to `rectangle()` and every test above would still pass.
+    func testRoundedSquareHasNoSharpCorners() {
+        let sharp = sharpCornerCount(PlanShape.square.polygon(area: 900))
+        let rounded = sharpCornerCount(PlanShape.roundedSquare.polygon(area: 900))
+        XCTAssertEqual(sharp, 4)
+        XCTAssertEqual(rounded, 0)
+        XCTAssertGreaterThan(PlanShape.roundedSquare.polygon(area: 900).count, 20,
+                             "a rounded plan needs enough points for the curve to be fitted")
+    }
+
+    /// The curvature detector has to *find* the rounding.
+    ///
+    /// The two halves of this are built independently — one generates the
+    /// plan, the other classifies vertices as curved or cornered — and the
+    /// renderer only smooth-shades a wall when the second agrees with the
+    /// first. A rounded plan that the detector reads as a polygon renders with
+    /// facets, which is exactly the ziggurat look the curvature code exists to
+    /// prevent.
+    func testRoundedSquareIsSeenAsCurved() {
+        let ring = PlanShape.roundedSquare.polygon(area: 620)
+        let curved = OutlineCurvature.curvedVertices(in: ring)
+        let fraction = Double(curved.filter { $0 }.count) / Double(max(curved.count, 1))
+        XCTAssertGreaterThan(fraction, 0.4,
+                             "most of a rounded square's outline is arc, not wall")
+
+        let square = PlanShape.square.polygon(area: 620)
+        let squareCurved = OutlineCurvature.curvedVertices(in: square)
+        XCTAssertEqual(squareCurved.filter { $0 }.count, 0,
+                       "a plain square has no curved vertices at all")
+    }
+
+    /// The number of vertices where the outline turns by more than 30°.
+    private func sharpCornerCount(_ ring: [Coordinate2D]) -> Int {
+        var points = ring
+        if let first = points.first, let last = points.last,
+           abs(first.x - last.x) < 1e-9, abs(first.y - last.y) < 1e-9 {
+            points.removeLast()
+        }
+        guard points.count >= 3 else { return 0 }
+        var count = 0
+        for index in points.indices {
+            let previous = points[(index + points.count - 1) % points.count]
+            let vertex = points[index]
+            let next = points[(index + 1) % points.count]
+            let a = (x: vertex.x - previous.x, y: vertex.y - previous.y)
+            let b = (x: next.x - vertex.x, y: next.y - vertex.y)
+            let lengthA = (a.x * a.x + a.y * a.y).squareRoot()
+            let lengthB = (b.x * b.x + b.y * b.y).squareRoot()
+            guard lengthA > 1e-9, lengthB > 1e-9 else { continue }
+            let cosine = (a.x * b.x + a.y * b.y) / (lengthA * lengthB)
+            if acos(min(max(cosine, -1), 1)) > 30 * .pi / 180 { count += 1 }
+        }
+        return count
+    }
 }

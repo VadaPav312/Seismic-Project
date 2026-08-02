@@ -85,11 +85,21 @@ struct HouseholdScreen: View {
                         actionTitle: "Sign in",
                         action: { showingAuth = true })
                 } else {
-                    Button("Sign out") {
-                        Task { await services.signOut() }
+                    // A link rather than a button that acts immediately. Signing
+                    // out and deleting the account are two very different things
+                    // and this is not the screen that can explain the difference
+                    // — the one that can is a tap away.
+                    NavigationLink {
+                        AccountScreen()
+                    } label: {
+                        HStack(spacing: 6) {
+                            Text("Sign out or delete account")
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 10, weight: .semibold))
+                        }
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.accent)
                     }
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Palette.verdictRed)
                 }
             } else {
                 Text("Sign in to back up your buildings and share a household, or carry on "
