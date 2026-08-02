@@ -238,6 +238,11 @@ final class SeismicNodeLink: NSObject, ObservableObject {
     private var pendingDiscoveries: [UUID: DiscoveredPeripheral] = [:]
     private var discoveryFlush: AnyCancellable?
 
+    /// Whether somebody has asked to look for a node, as opposed to the app
+    /// quietly reconnecting to one it already knows. The two want opposite
+    /// behaviour from the radio and only one of them is a user's intent.
+    private var wantsScan = false
+
     private var scanTimeoutTask: Task<Void, Never>?
     private var signalTask: Task<Void, Never>?
 
@@ -483,13 +488,16 @@ final class SeismicNodeLink: NSObject, ObservableObject {
         Task { [weak self] in
             for index in missing {
                 await MainActor.run { self?.send(.resendChunk(index)) }
-                // Paced, because the firmware's own transfer loop waits twelve
-                // milliseconds between chunks to let the BLE buffer drain, and
-                // a burst of requests would arrive faster than it can answer.
-                try? await Task.sleep(for: .milliseconds(60))
+                // Paced against the wire, not against a guess. A chunk is about
+                // 160 bytes and the link is 9600 baud — 960 bytes a second — so
+                // one chunk is 168 ms of airtime before the firmware's own gap.
+                // Asking faster than that just queues requests behind the
+                // answers to the previous ones.
+                try? await Task.sleep(for: .milliseconds(220))
             }
-            // Give the replies time to land before judging the result.
-            try? await Task.sleep(for: .milliseconds(400))
+            // Give the replies time to land before judging the result. The
+            // last request still has a chunk's worth of airtime to come back.
+            try? await Task.sleep(for: .milliseconds(600))
             await MainActor.run {
                 guard let self else { return }
                 let updated = self.assembler.result()
@@ -645,6 +653,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     /// Starts scanning for nodes.
     func startScanning() {
+        wantsScan = true
         source = .bluetooth
         tickTimer?.cancel()
         simulator = nil
@@ -666,6 +675,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
     }
 
     func stopScanning() {
+        wantsScan = false
         scanTimeoutTask?.cancel()
         stopPublishingDiscoveries()
         central?.stopScan()
@@ -730,6 +740,7 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
             fault("That node is no longer visible to the system. Scan again.")
             return
         }
+        wantsScan = false
         scanTimeoutTask?.cancel()
         stopPublishingDiscoveries()
         resetState()
@@ -756,6 +767,16 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
                 self.fault("No answer in ten seconds. CoreBluetooth keeps trying indefinitely, "
                            + "so this is the app giving up rather than the radio. The usual "
                            + "cause is the module being connected to something else already.")
+                // Most often this is a remembered board that has been
+                // re-flashed or given away. Forget it and look again, rather
+                // than retrying a peripheral that is never coming back while
+                // the one on the desk goes unlisted.
+                if let peripheral = self.peripheral {
+                    self.central?.cancelPeripheralConnection(peripheral)
+                }
+                self.rememberedIdentifier = nil
+                self.note("Forgetting that node and scanning again.")
+                self.startScanning()
             }
         }
     }
@@ -820,6 +841,20 @@ extension SeismicNodeLink: CBCentralManagerDelegate, CBPeripheralDelegate {
         onMain { [self] in
             switch central.state {
             case .poweredOn:
+                // Somebody asking to scan gets a scan.
+                //
+                // This branch used to try the remembered node first and return,
+                // so once any node had ever been paired, tapping "find a node"
+                // showed "Scanning…" over a radio that was not scanning — and
+                // if the remembered board had been re-flashed, renamed or given
+                // to somebody else, the list stayed empty for ever with no way
+                // to reach a different one. Silent auto-reconnect is right when
+                // nobody asked for anything and wrong the moment they did.
+                if wantsScan {
+                    beginScan()
+                    return
+                }
+
                 // Reconnect to the remembered node without being asked. Coming
                 // back into range should not need a tap.
                 if let remembered = rememberedIdentifier,

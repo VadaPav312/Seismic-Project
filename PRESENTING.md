@@ -7,10 +7,11 @@ recite them.
 
 - [ ] Board powered, BLE module **blinking** not steady. Steady means it is
       already paired to something else and you will not find it.
-- [ ] **Serial1 baud matches.** `arduino.ino:608` is `Serial1.begin(115200)`.
-      Most HM-10s ship at 9600. If they disagree you get a connected link that
-      is silent — the Hardware screen says so after four seconds, but find out
-      now, not on stage.
+- [ ] **Baud is 9600 on both sides.** The firmware is `Serial1.begin(BLE_BAUD)`
+      with `BLE_BAUD = 9600`, which is what an HM-10 ships with. If your module
+      was reconfigured, set it back with `AT+BAUD0` or change `BLE_BAUD`. A
+      mismatch gives you a connected link that is silent — the Hardware screen
+      says so after four seconds, but find out now, not on stage.
 - [ ] Phone: Bluetooth on, **Do Not Disturb on**, brightness up, screen
       auto-lock off.
 - [ ] Open the app, go to **Node → Find a node → Connect to a Bluetooth

@@ -65,23 +65,27 @@ final class FirmwareNodeTransport: NodeTransport, @unchecked Sendable {
     /// node never measured.
     private var sequence: UInt16 = 0
     private var pending: [Double] = []
-    private static let batchSize = 5
+    private static let batchSize = 3
 
     /// The rate the firmware streams live samples at, in hertz.
     ///
     /// Not a guess and not the same as its sampling rate. `arduino.ino` samples
-    /// at `SAMPLE_HZ` = 50 and emits an `acc` line every `SAMPLE_HZ / 10`
-    /// samples, so ten a second reach the radio — the other forty are used by
-    /// its own STA/LTA detector and never leave the board. Getting this wrong
-    /// is not cosmetic: every period, every spectrum and every arrival time
-    /// downstream is derived from it, so a factor of two here reports a
-    /// building swaying twice as fast as it does.
+    /// at `SAMPLE_HZ` = 50 and emits an `acc` line every `STREAM_DIVIDER`
+    /// samples, so `STREAM_HZ` of them a second reach the radio — the rest feed
+    /// its own STA/LTA detector and never leave the board. **This constant and
+    /// the firmware's `STREAM_HZ` are one number in two places and must be
+    /// changed together.** Getting it wrong is not cosmetic: every period,
+    /// every spectrum and every arrival time downstream is derived from it, so
+    /// a factor of two reports a building swaying twice as fast as it does.
+    ///
+    /// Five rather than ten because the link is 9600 baud, which is 960 bytes a
+    /// second, and the telemetry line alone is 128 of them.
     ///
     /// The 50 Hz data is not lost. During an event the firmware stops streaming
     /// and writes to `recBuf` instead, and the whole ten seconds comes across
     /// afterwards in checksummed chunks at the full rate — which is the record
     /// an assessment is actually made from.
-    static let liveStreamRate = 10.0
+    static let liveStreamRate = 5.0
 
     @MainActor
     init(link: SeismicNodeLink) {

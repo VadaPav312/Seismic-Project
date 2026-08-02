@@ -60,6 +60,44 @@
 const uint16_t SAMPLE_HZ        = 50;
 const uint32_t SAMPLE_PERIOD_US = 1000000UL / SAMPLE_HZ;
 
+/* ---- the serial budget -------------------------------------------------
+   The BLE module is the narrowest thing in the whole system and everything
+   sent has to fit through it. At 9600 8N1 there are ten bits to a byte, so
+   the link carries 960 bytes a second and no more. Exceeding that does not
+   drop data — it blocks, inside the sampling loop, which is worse.
+
+     telemetry   ~128 bytes  x 1 Hz            = 128 B/s
+     acceleration  ~31 bytes x STREAM_HZ
+     a recording ~161 bytes  x 25 chunks       = 4025 B, about 4.2 s
+
+   At STREAM_HZ = 10 the steady state was 438 B/s, or 46% of the link, and a
+   128-byte telemetry line does not fit in the AVR's 64-byte transmit buffer
+   — so once a second the sampler stalled for ~66 ms waiting on the radio.
+   At 5 Hz it is 283 B/s, under a third, and telemetry is the only thing that
+   ever has to wait.
+
+   Halving the stream costs nothing real: the detector runs on all 50 Hz on
+   the board, and the ten seconds an assessment is actually made from is
+   recorded at the full rate and sent afterwards. The stream is for the trace
+   on screen, and no eye resolves a seismograph faster than this. */
+const uint32_t BLE_BAUD          = 9600;
+const uint16_t BLE_BYTES_PER_SEC = BLE_BAUD / 10;   /* 8N1: ten bits a byte */
+const uint16_t STREAM_HZ         = 5;
+const uint8_t  STREAM_DIVIDER    = SAMPLE_HZ / STREAM_HZ;
+
+/* Measured lengths of the two lines that are sent continuously. */
+const uint16_t TELEMETRY_BYTES = 128;
+const uint16_t ACCEL_BYTES     = 31;
+
+/* The budget, checked by the compiler rather than remembered.
+   Raising STREAM_HZ or adding a field to the telemetry line is exactly the
+   change somebody makes without thinking about the radio, and the symptom —
+   a sampling loop that stalls waiting on a full transmit buffer — looks
+   nothing like its cause. Half the link is left free for the event messages,
+   which all arrive at once and matter far more than the trace. */
+static_assert(TELEMETRY_BYTES + ACCEL_BYTES * STREAM_HZ < BLE_BYTES_PER_SEC / 2,
+              "steady-state output must stay under half the serial link");
+
 const float    STA_ALPHA        = 0.20f;    /* short-term smoothing */
 const float    LTA_ALPHA        = 0.002f;   /* long-term smoothing  */
 const float    LTA_FLOOR        = 60.0f;
@@ -290,6 +328,10 @@ void sendActuator(const char *dev, uint8_t st) {
 }
 
 const uint8_t REC_PER_CHUNK = 20;
+/* A BLE notification is twenty bytes, so a 160-byte chunk is eight of them.
+   Long enough for the module to get them out, short enough that twenty-five
+   chunks stay inside five seconds. */
+const uint16_t CHUNK_GAP_MS = 30;
 
 uint16_t recChunkCount() {
   return (recCount + REC_PER_CHUNK - 1) / REC_PER_CHUNK;
@@ -326,7 +368,14 @@ void sendRecording() {
   uint16_t chunks = recChunkCount();
   for (uint16_t c = 0; c < chunks; c++) {
     sendChunk(c);
-    delay(12);                    /* let the BLE buffer drain */
+    /* One chunk is about 160 bytes, which at 9600 is 168 ms on the wire. The
+       twelve milliseconds that used to be here were sized for a link ten
+       times faster; at this rate the transmit buffer simply blocked instead,
+       which throttled it accidentally rather than deliberately. Waiting for
+       the buffer to actually empty is the honest version, and it gives the
+       module's own radio time to push the notification out. */
+    Serial1.flush();
+    delay(CHUNK_GAP_MS);
   }
   say("{\"t\":\"recend\"}");
 }
@@ -605,7 +654,10 @@ void pollCommands() {
 /* ============================ SETUP ===================================== */
 void setup() {
   Serial.begin(115200);
-  Serial1.begin(115200);        /* match your BLE module - use 9600 if unchanged */
+  /* 9600, which is what an HM-10 and nearly every clone of it ships with.
+     It is also the constraint everything below is sized against: 9600 8N1 is
+     960 bytes a second, and that is not a lot. See BLE_BYTES_PER_SEC. */
+  Serial1.begin(BLE_BAUD);
   Wire.begin();
   Wire.setClock(400000);
 
@@ -670,7 +722,7 @@ void loop() {
     if (tiltOn())                                              { voteTilt  = true; voteTiltMs  = millis(); }
     if (analogRead(PIN_SOUND) > soundBaseline + SOUND_DELTA)   { voteSound = true; voteSoundMs = millis(); }
 
-    if (++streamDivider >= (SAMPLE_HZ / 10)) {
+    if (++streamDivider >= STREAM_DIVIDER) {
       streamDivider = 0;
       if (state == ST_MONITOR || state == ST_DISARMED)
         sendAccel((int16_t)constrain(accelMag() - gravityMag, -32000, 32000));
