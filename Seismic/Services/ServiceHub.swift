@@ -162,9 +162,27 @@ final class ServiceHub: ObservableObject {
            ProcessInfo.processInfo.environment["SEISMIC_SKIP_SIGN_IN"] == "1" {
             account = .guest()
         }
+
+        // The account above is a name and an id, kept in UserDefaults so the
+        // launch screen can render before anything asynchronous happens. The
+        // *tokens* live in the keychain and have to be put back too, or every
+        // authenticated action degrades silently after the first relaunch —
+        // which is exactly how deleting an account came to report "not signed
+        // in" over an account displayed on the screen above it.
+        if let account, !account.isGuest {
+            Task { await cloud.restorePersistedSession() }
+        }
         if let data = defaults.data(forKey: Self.householdKey),
            let stored = try? JSONDecoder().decode(Household.self, from: data) {
             household = stored
+        }
+
+        // An account already on this device is not a new arrival, even on the
+        // first launch after this was added. Without seeding it, the first
+        // sign-out-and-back-in by an existing user would look like a different
+        // person and replay the introduction over their own work.
+        if let account, defaults.string(forKey: Self.lastAccountKey) == nil {
+            defaults.set(account.id, forKey: Self.lastAccountKey)
         }
     }
 
@@ -183,9 +201,35 @@ final class ServiceHub: ObservableObject {
     }
 
     func continueAsGuest() {
-        account = .guest()
+        adopt(UserAccount.guest())
+    }
+
+    /// Whether the account that just signed in is somebody this device has not
+    /// seen before.
+    ///
+    /// Set by `adopt` and read once by the app, which uses it to put the
+    /// introduction back. A phone that has already been through onboarding
+    /// keeps `didCompleteOnboarding` set for ever, so the second person to use
+    /// it — a partner, a new owner, anybody handed the demo — was dropped
+    /// straight into the main interface having been shown nothing.
+    @Published private(set) var didAdoptNewAccount = false
+
+    func clearNewAccountFlag() { didAdoptNewAccount = false }
+
+    /// Takes on an account and notices whether it is a new one.
+    private func adopt(_ new: UserAccount) {
+        let previous = UserDefaults.standard.string(forKey: Self.lastAccountKey)
+        // A guest becoming a real account is the same person continuing, not a
+        // new one arriving — their work is carried across, and re-running the
+        // introduction over the building they just imported would be absurd.
+        let wasGuestBecomingReal = (account?.isGuest ?? false) && !new.isGuest
+        didAdoptNewAccount = previous != new.id && !wasGuestBecomingReal
+        UserDefaults.standard.set(new.id, forKey: Self.lastAccountKey)
+        account = new
         persistIdentity()
     }
+
+    private static let lastAccountKey = "seismic.lastAccountID"
 
     /// Signs in and carries the guest's work across.
     ///
@@ -196,8 +240,7 @@ final class ServiceHub: ObservableObject {
         do {
             let session = try await cloud.signIn(email: email, password: password)
             let wasGuest = account?.isGuest ?? false
-            account = session.account
-            persistIdentity()
+            adopt(session.account)
             if wasGuest { queueGuestDataForUpload() }
             return nil
         } catch let error as ServiceError {
@@ -212,8 +255,7 @@ final class ServiceHub: ObservableObject {
             let session = try await cloud.signUp(email: email, password: password,
                                                  displayName: displayName)
             let wasGuest = account?.isGuest ?? false
-            account = session.account
-            persistIdentity()
+            adopt(session.account)
             if wasGuest { queueGuestDataForUpload() }
             return nil
         } catch let error as ServiceError {
@@ -228,8 +270,7 @@ final class ServiceHub: ObservableObject {
             let session = try await cloud.signIn(idToken: idToken, provider: provider,
                                                  displayName: displayName)
             let wasGuest = account?.isGuest ?? false
-            account = session.account
-            persistIdentity()
+            adopt(session.account)
             if wasGuest { queueGuestDataForUpload() }
             return nil
         } catch let error as ServiceError {
@@ -257,8 +298,7 @@ final class ServiceHub: ObservableObject {
             let callback = try await signIn.authenticate(attempt)
             let session = try await cloud.completeOAuth(callback: callback, attempt: attempt)
             let wasGuest = account?.isGuest ?? false
-            account = session.account
-            persistIdentity()
+            adopt(session.account)
             if wasGuest { queueGuestDataForUpload() }
             return nil
         } catch WebSignIn.Failure.cancelled {

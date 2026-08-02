@@ -396,6 +396,26 @@ public final class SecretsVault: @unchecked Sendable {
         return loaded
     }
 
+    /// Secure storage for something that is not a configured credential.
+    ///
+    /// A signed-in session's tokens have to survive a relaunch — an app that
+    /// forgets them is an app that cannot act on the user's behalf against
+    /// their own account the next morning — and they must not go anywhere near
+    /// `UserDefaults`, which is a plain file in the app container. They are not
+    /// `SecretKey`s though: those enumerate the things somebody configures, and
+    /// Settings lists every one of them. So they go through the same storage
+    /// under a namespaced key, and never appear in that list.
+    public func secureValue(named name: String) -> String? {
+        let value = storage.read(Self.privatePrefix + name)
+        return (value?.isEmpty ?? true) ? nil : value
+    }
+
+    public func setSecureValue(_ value: String?, named name: String) {
+        storage.write(Self.privatePrefix + name, value: value)
+    }
+
+    private static let privatePrefix = "seismic.private."
+
     public func value(for key: SecretKey) -> String? {
         if let v = storage.read(key.rawValue), !v.isEmpty { return v }
         lock.lock(); let env = envDefaults[key.rawValue]; lock.unlock()

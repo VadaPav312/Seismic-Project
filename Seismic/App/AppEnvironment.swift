@@ -146,6 +146,9 @@ final class AppEnvironment: ObservableObject {
     private var timer: AnyCancellable?
     private var simulatedNode: SimulatedNode?
     private var phoneSensor: PhoneSensorTransport?
+    /// The real board, when one is in use. Held so the whole app's data comes
+    /// from it and not only the Hardware screen.
+    private var hardwareTransport: FirmwareNodeTransport?
 
     /// Where the motion on screen is coming from.
     ///
@@ -476,16 +479,36 @@ final class AppEnvironment: ObservableObject {
     }
 
     #if canImport(CoreBluetooth)
-    /// Switches to real hardware. The rest of the app is unaffected — it talks
-    /// to `NodeSession`, which cannot tell the difference.
-    func attachBluetoothTransport() {
+    /// Switches to real hardware and starts looking for it.
+    ///
+    /// Goes through `SeismicNodeLink`, which speaks the protocol `arduino.ino`
+    /// actually emits. The older `BluetoothTransport` speaks `NodeProtocol` —
+    /// binary, framed, checksummed — which the firmware does not send a single
+    /// byte of, so it would have connected and then parsed nothing for ever.
+    /// Nothing attached it in the first place, which is why the sensor picker
+    /// only ever listed the simulated node.
+    ///
+    /// The rest of the app is unaffected: it talks to `NodeSession`, which
+    /// cannot tell what is underneath it.
+    func attachHardwareNode() {
         stopTicking()
         releaseTransports()
         sensorSource = .node
-        let transport = BluetoothTransport()
+        node.reset()
+        let transport = FirmwareNodeTransport(link: link)
+        hardwareTransport = transport
         wire(transport)
         transport.startScanning()
+        startTicking()
     }
+
+    /// Connects to a device the scan turned up, and remembers it.
+    func connectToHardwareNode(_ id: UUID) {
+        if hardwareTransport == nil { attachHardwareNode() }
+        hardwareTransport?.connect(to: id.uuidString)
+    }
+
+    var isUsingHardwareNode: Bool { hardwareTransport != nil }
     #endif
 
     /// Lets go of whichever transport was in use.
@@ -497,6 +520,10 @@ final class AppEnvironment: ObservableObject {
         phoneSensor?.disconnect()
         phoneSensor = nil
         simulatedNode = nil
+        // Not disconnected: swapping the app's *source* away from the node is
+        // not a reason to drop a radio link that the Hardware screen may still
+        // be driving. Only released, so nothing further is forwarded.
+        hardwareTransport = nil
     }
 
     private func wire(_ transport: NodeTransport) {

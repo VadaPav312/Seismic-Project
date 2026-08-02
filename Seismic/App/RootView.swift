@@ -193,6 +193,23 @@ struct RootView: View {
             guard completed else { return }
             startTutorialIfDue()
         }
+        // A new person on this phone starts at the beginning.
+        //
+        // `didCompleteOnboarding` and the tutorial's own completion flag are
+        // per-device, not per-account, so once anybody had been through the
+        // introduction the *next* person to sign in was dropped straight into
+        // the main interface having been shown nothing at all. Signing back
+        // into the same account is not that, and neither is a guest who has
+        // just made their work permanent by creating an account — in both of
+        // those the introduction would be re-running over work already done.
+        .onChange(of: services.didAdoptNewAccount) { _, isNew in
+            guard isNew else { return }
+            services.clearNewAccountFlag()
+            presented = nil
+            selection = .home
+            tutorial.reset()
+            env.didCompleteOnboarding = false
+        }
         .onChange(of: tutorial.replayRequested) { _, requested in
             guard requested else { return }
             tutorial.replayRequested = false

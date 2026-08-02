@@ -712,72 +712,200 @@ struct ActuatorRow: View {
     }
 }
 
-/// The bluetooth scanner, structured as a guided list.
+/// Choosing what the app listens to: a real board over Bluetooth, this phone,
+/// or the simulator.
+///
+/// It used to scan through whatever transport happened to be attached, which
+/// at launch is the simulator — so the only thing it could ever list was the
+/// simulated node, and there was no route from here to real hardware at all.
+/// It now drives the Bluetooth radio directly and lists what is actually
+/// nearby.
 struct NodeScannerSheet: View {
-    @EnvironmentObject private var node: NodeStream
     @EnvironmentObject private var env: AppEnvironment
     @Environment(\.dismiss) private var dismiss
+    @State private var isScanning = false
+
+    private var link: SeismicNodeLink { env.link }
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                VStack(spacing: Theme.Metrics.spacing) {
-                    if node.discovered.isEmpty {
-                        DesignedEmptyState(
-                            icon: "dot.radiowaves.left.and.right",
-                            title: "Looking for nodes",
-                            message: "Make sure the node is powered and within a few metres. "
-                                + "If you do not have hardware yet, the simulated node behaves "
-                                + "identically and needs nothing at all.",
-                            actionTitle: "Use the simulated node",
-                            action: {
-                                env.attachSimulatedNode()
-                                dismiss()
-                            })
-                            .frame(minHeight: 360)
-                    } else {
-                        ForEach(node.discovered) { node in
-                            Button {
-                                env.session.connect(to: node.id)
-                                dismiss()
-                            } label: {
-                                HStack(spacing: Theme.Metrics.spacing) {
-                                    Image(systemName: node.isSimulated
-                                          ? "cpu" : "sensor.tag.radiowaves.forward")
-                                        .font(.title3)
-                                        .foregroundStyle(Theme.Palette.accent)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(node.name)
-                                            .font(Theme.Typography.headline)
-                                            .foregroundStyle(Theme.Palette.textPrimary)
-                                        Text("\(node.rssi) dBm · \(node.signalBars)/4 bars")
-                                            .font(Theme.Typography.caption)
-                                            .foregroundStyle(Theme.Palette.textSecondary)
-                                    }
-                                    Spacer()
-                                    if node.isSimulated {
-                                        StatusPill(text: "Simulated",
-                                                   tint: Theme.Palette.accent)
-                                    }
-                                }
-                                .instrumentPanel()
-                            }
-                            .buttonStyle(.plain)
+                VStack(alignment: .leading, spacing: Theme.Metrics.s5) {
+                    if isScanning {
+                        // A separate view so the link is *observed*. Reading
+                        // `env.link.discovered` from here would never redraw:
+                        // the link is its own ObservableObject, and a change
+                        // inside it does not republish the environment holding
+                        // it — so the list would stay empty while devices
+                        // arrived.
+                        BluetoothDeviceList(link: link) { id in
+                            env.connectToHardwareNode(id)
+                            dismiss()
                         }
+                    } else {
+                        invitation
                     }
+                    otherSources
                 }
                 .padding(Theme.Metrics.screenPadding)
+                .contentColumn()
             }
             .seismicBackground()
             .navigationTitle("Find a node")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Close") { dismiss() }
+                    Button("Close") { link.stopScanning(); dismiss() }
+                }
+                if isScanning {
+                    ToolbarItem(placement: .primaryAction) {
+                        Button("Scan again") { link.startScanning() }
+                    }
                 }
             }
-            .onAppear { env.session.startScanning() }
         }
+    }
+
+    // MARK: Asking first
+
+    /// Bluetooth is not started until somebody asks for it.
+    ///
+    /// Scanning on appearance would put the system's Bluetooth permission
+    /// prompt in front of a person who opened this screen to pick the
+    /// simulator, and a permission asked for before the reason is visible is a
+    /// permission that gets denied once and for ever.
+    private var invitation: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.s4) {
+            SectionLabel("Your node", systemImage: "sensor.tag.radiowaves.forward")
+
+            Text("The seismic node talks to this phone over Bluetooth. Power the board up, "
+                 + "check the small blue module on it is blinking rather than lit steadily — "
+                 + "steady means it is already paired to something else — and then look for it.")
+                .font(Theme.Typography.callout)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                isScanning = true
+                link.startScanning()
+            } label: {
+                Label("Connect to a Bluetooth device", systemImage: "dot.radiowaves.left.and.right")
+                    .font(Theme.Typography.headline)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 54)
+            }
+            .buttonStyle(PrimaryButtonStyle())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .instrumentPanel()
+    }
+
+    // MARK: The alternatives
+
+    private var otherSources: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.s4) {
+            SectionLabel("No hardware to hand", systemImage: "iphone.gen3")
+
+            Text("Both of these are complete. The phone's own accelerometer is a real "
+                 + "instrument and everything derived from it is real; the simulator is "
+                 + "physically realistic and is marked as synthetic everywhere it appears.")
+                .font(Theme.Typography.callout)
+                .foregroundStyle(Theme.Palette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Button {
+                env.attachPhoneSensor()
+                dismiss()
+            } label: {
+                Label("Use this phone's accelerometer", systemImage: "iphone.gen3")
+                    .font(Theme.Typography.callout)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: Theme.Metrics.minimumTapTarget)
+            }
+            .buttonStyle(SecondaryButtonStyle())
+
+            Button {
+                env.attachSimulatedNode()
+                dismiss()
+            } label: {
+                Label("Use the simulated node", systemImage: "cpu")
+                    .font(Theme.Typography.callout)
+                    .frame(maxWidth: .infinity)
+                    .frame(height: Theme.Metrics.minimumTapTarget)
+            }
+            .buttonStyle(SecondaryButtonStyle())
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .instrumentPanel()
+    }
+}
+
+/// The list of what the radio can see, observing the link so it updates.
+struct BluetoothDeviceList: View {
+    @ObservedObject var link: SeismicNodeLink
+    let onPick: (UUID) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Metrics.s4) {
+            HStack {
+                SectionLabel("Bluetooth devices", systemImage: "dot.radiowaves.left.and.right")
+                Spacer()
+                if link.connection == .scanning {
+                    ProgressView().controlSize(.small)
+                }
+            }
+
+            if link.discovered.isEmpty {
+                Text(link.connection == .scanning
+                     ? "Looking. Everything nearby will be listed — these serial modules "
+                       + "usually advertise a name and nothing else, so the node cannot be "
+                       + "picked out from the advertisement alone."
+                     : "Nothing found.")
+                    .font(Theme.Typography.callout)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            ForEach(link.discovered.sorted { $0.sortKey > $1.sortKey }) { device in
+                Button { onPick(device.id) } label: { row(device) }
+                    .buttonStyle(.plain)
+                    .disabled(!device.isConnectable)
+            }
+
+            if let fault = link.log.first(where: { $0.kind == .fault }) {
+                Text(fault.text)
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.verdictAmber)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .instrumentPanel()
+    }
+
+    private func row(_ device: SeismicNodeLink.DiscoveredPeripheral) -> some View {
+        HStack(spacing: Theme.Metrics.s4) {
+            Image(systemName: device.advertisesNodeService
+                  ? "sensor.tag.radiowaves.forward" : "dot.radiowaves.left.and.right")
+                .font(.title3)
+                .foregroundStyle(Theme.Palette.accent)
+                .frame(width: 28)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(device.name)
+                    .font(Theme.Typography.headline)
+                    .foregroundStyle(Theme.Palette.textPrimary)
+                Text("\(device.rssi) dBm · \(device.signalBars)/4 bars")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textSecondary)
+            }
+            Spacer(minLength: 0)
+            if device.advertisesNodeService {
+                StatusPill(text: "LIKELY", tint: Theme.Palette.accent)
+            }
+        }
+        .padding(.vertical, Theme.Metrics.s2)
+        .contentShape(Rectangle())
     }
 }
 

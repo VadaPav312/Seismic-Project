@@ -425,6 +425,7 @@ public actor CloudService {
             // old one, so the identity is carried across explicitly rather than
             // left to whatever the response happened to contain.
             if response.user == nil { session?.account = current.account }
+            persistSession()
             return true
         } catch {
             return false
@@ -448,12 +449,67 @@ public actor CloudService {
             expiresAt: Date().addingTimeInterval(TimeInterval(response.expires_in ?? 3600)),
             account: account)
         session = created
+        persistSession()
         return created
     }
 
-    public func restore(_ session: CloudSession) { self.session = session }
-    public func signOut() { session = nil }
+    public func restore(_ session: CloudSession) {
+        self.session = session
+        persistSession()
+    }
+
+    public func signOut() {
+        session = nil
+        persistSession()
+    }
+
     public func currentSession() -> CloudSession? { session }
+
+    // MARK: Surviving a relaunch
+
+    private static let sessionKey = "cloud.session"
+
+    /// Puts the session back after a cold launch.
+    ///
+    /// Without this the account was restored from `UserDefaults` — a name and
+    /// an id, enough to render "signed in as" — while the *tokens* were only
+    /// ever held in memory. So every authenticated action silently degraded
+    /// after the first relaunch, and account deletion, which is the one that
+    /// cannot degrade quietly, reported "Not signed in" over an account the
+    /// screen above it was displaying.
+    ///
+    /// In the keychain rather than `UserDefaults`, because these are bearer
+    /// tokens and `UserDefaults` is a plain file in the app container.
+    @discardableResult
+    public func restorePersistedSession() -> CloudSession? {
+        guard session == nil,
+              let raw = vault.secureValue(named: Self.sessionKey),
+              let data = raw.data(using: .utf8),
+              let stored = try? JSONDecoder().decode(CloudSession.self, from: data)
+        else { return session }
+        session = stored
+        return stored
+    }
+
+    private func persistSession() {
+        guard let session, let data = try? JSONEncoder().encode(session),
+              let text = String(data: data, encoding: .utf8) else {
+            vault.setSecureValue(nil, named: Self.sessionKey)
+            return
+        }
+        vault.setSecureValue(text, named: Self.sessionKey)
+    }
+
+    /// Whether there is a usable session, refreshing it first if it has aged
+    /// out. Expiry is not a failure — a refresh token exists precisely so a
+    /// user who signed in last week is still signed in today.
+    @discardableResult
+    public func ensureSession() async -> Bool {
+        restorePersistedSession()
+        guard let current = session else { return false }
+        guard current.isExpired else { return true }
+        return await refreshIfNeeded()
+    }
 
     /// What deleting an account was actually able to do.
     ///
@@ -471,6 +527,11 @@ public actor CloudService {
         public var identityRemoved = false
         /// Why the identity could not be removed, when it could not.
         public var identityFailure: String?
+        /// True when this build has no Supabase project configured, so nothing
+        /// about the account was ever sent to a server. Reported rather than
+        /// glossed over: "removed from the server" and "there was never a
+        /// server" are different sentences and only one of them is true.
+        public var serverWasNeverUsed = false
 
         public var isComplete: Bool { failures.isEmpty && identityRemoved }
     }
@@ -491,8 +552,26 @@ public actor CloudService {
     /// reports the identity as not removed rather than pretending.
     public func deleteAccount() async -> DeletionOutcome {
         var outcome = DeletionOutcome()
-        guard let userID = session?.account.id else {
-            outcome.identityFailure = "Not signed in."
+
+        guard isConfigured else {
+            // No project behind this build at all, so nothing of this account
+            // was ever sent anywhere. Saying "could not be removed" would
+            // invent a server to have failed against.
+            outcome.identityRemoved = true
+            outcome.serverWasNeverUsed = true
+            return outcome
+        }
+
+        // The tokens, not just the name. The account survives a relaunch in
+        // `UserDefaults` while the session lives in the keychain, and asking
+        // the wrong one whether we are signed in is what made this report
+        // "Not signed in" over an account plainly displayed on the screen
+        // above it.
+        guard await ensureSession(), let userID = session?.account.id else {
+            outcome.identityFailure =
+                "This device no longer holds a valid sign-in for that account — the session "
+                + "expired or was revoked. Sign in again and delete from there; nothing has "
+                + "been removed from the server."
             return outcome
         }
 

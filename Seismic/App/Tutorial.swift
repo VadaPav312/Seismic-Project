@@ -54,6 +54,16 @@ final class TutorialDirector: ObservableObject {
         replayRequested = true
     }
 
+    /// Puts the tour back to never-seen, without asking for it to run now.
+    ///
+    /// Used when a different person signs in on this phone: the introduction
+    /// comes first and the tour follows it, so requesting a replay here would
+    /// start the tour on top of the introduction.
+    func reset() {
+        didComplete = false
+        replayRequested = false
+    }
+
     private var navigate: ((AppSection) -> Void)?
 
     let steps: [Step] = [
