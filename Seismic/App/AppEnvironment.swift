@@ -303,7 +303,19 @@ final class AppEnvironment: ObservableObject {
         }
 
         bootstrapStage = "Starting the node"
-        attachSimulatedNode()
+        // Drives the whole app through the *firmware* transport, with the
+        // link's own simulator behind it instead of a board.
+        //
+        // That is the same code path a real node takes — the same parser, the
+        // same transport, the same session — so it is how the hardware
+        // integration gets exercised without hardware, and how a screen that
+        // works against the simulator is shown to work against the board
+        // rather than assumed to.
+        if ProcessInfo.processInfo.environment["SEISMIC_FIRMWARE_PATH"] == "1" {
+            attachHardwareNode(startScanning: false)
+        } else {
+            attachSimulatedNode()
+        }
 
         bootstrapStage = "Ready"
         isBootstrapped = true

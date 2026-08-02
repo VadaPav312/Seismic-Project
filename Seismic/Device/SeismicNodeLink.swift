@@ -52,7 +52,26 @@ final class SeismicNodeLink: NSObject, ObservableObject {
     @Published private(set) var transfer: FirmwareRecordingAssembler.Result?
     @Published private(set) var isTransferring = false
 
-    /// A rolling window of the live acceleration samples, for the trace.
+    /// How far through its travel the stepper is, 0…100, while it is moving.
+    ///
+    /// Nil when it is not. A full revolution of the water valve takes about six
+    /// seconds, and without this the interface went blank for all of it and
+    /// then asserted the valve was shut — which is exactly the "trust me" the
+    /// photoresistor exists to refuse.
+    @Published private(set) var stepperProgress: Int?
+    @Published private(set) var stepperDegrees = 0
+
+    /// One acceleration sample, in m/s², with gravity already removed.
+    struct Axes: Equatable {
+        var x: Double
+        var y: Double
+        var z: Double
+    }
+
+    /// A rolling window of the live acceleration samples, all three axes.
+    @Published private(set) var axes: [Axes] = []
+    /// The same window as magnitudes, for the single trace on the hardware
+    /// screen where one line is what fits.
     @Published private(set) var trace: [Double] = []
     private let traceCapacity = 300
 
@@ -200,6 +219,9 @@ final class SeismicNodeLink: NSObject, ObservableObject {
     /// Rounds of per-chunk re-requests since the last complete transfer.
     private var recoveryRounds = 0
 
+    /// Set between sending REBOOT and the boot line that answers it.
+    private var expectsReboot = false
+
     #if canImport(CoreBluetooth)
     private var central: CBCentralManager?
     private var peripheral: CBPeripheral?
@@ -325,12 +347,14 @@ final class SeismicNodeLink: NSObject, ObservableObject {
         actuators = [:]; verifications = [:]
         lastTrigger = nil; assessment = nil; calibration = nil
         transfer = nil; isTransferring = false
-        trace = []; commandState = [:]
+        trace = []; axes = []; commandState = [:]
         assembler.reset()
         awaitingAck = [:]
         recoveryRounds = 0
         commentary = []
         narrator.reset()
+        stepperProgress = nil
+        stepperDegrees = 0
     }
 
     // MARK: Receiving
@@ -358,6 +382,16 @@ final class SeismicNodeLink: NSObject, ObservableObject {
         switch message {
         case .boot(let accelerometer):
             hasAccelerometer = accelerometer
+            // A restart we asked for is not a fault. Without this, pressing
+            // Restart would file a brownout — the one fault that means "your
+            // supply dipped mid-event and the recording around it is suspect"
+            // — against an action the user deliberately took.
+            if expectsReboot {
+                expectsReboot = false
+                note("The node restarted, as asked.")
+                stepperProgress = nil
+                return
+            }
             // A boot we did not ask for is a brownout. The board restarting
             // mid-event is the one fault that must never be read as a seismic
             // trigger — it produces a burst of everything at once and looks,
@@ -382,9 +416,15 @@ final class SeismicNodeLink: NSObject, ObservableObject {
             // Votes expiring is itself worth seeing, so the state is replaced
             // wholesale rather than merged.
 
-        case .acceleration(let deviation, let ratio):
+        case .acceleration(let x, let y, let z, let ratio):
             // Counts to m/s², the same conversion the assembler uses.
-            trace.append(Double(deviation) / 16384.0 * gravity)
+            let scale = gravity / 16384.0
+            let sample = Axes(x: Double(x) * scale, y: Double(y) * scale, z: Double(z) * scale)
+            axes.append(sample)
+            if axes.count > traceCapacity { axes.removeFirst(axes.count - traceCapacity) }
+            // The magnitude, kept for the single trace on the hardware screen.
+            trace.append((sample.x * sample.x + sample.y * sample.y
+                          + sample.z * sample.z).squareRoot())
             if trace.count > traceCapacity { trace.removeFirst(trace.count - traceCapacity) }
             if var current = telemetry {
                 current.ratio = ratio
@@ -404,6 +444,10 @@ final class SeismicNodeLink: NSObject, ObservableObject {
         case .phase(let value):
             phase = value
             if value != .warning { countdown = nil }
+
+        case .stepperProgress(let percent, let degrees):
+            stepperProgress = percent >= 100 ? nil : percent
+            stepperDegrees = degrees
 
         case .actuator(let device, let state):
             actuators[device] = state
@@ -516,6 +560,7 @@ final class SeismicNodeLink: NSObject, ObservableObject {
 
     /// Sends a command and tracks what happens to it.
     func send(_ command: Firmware.Command) {
+        if command == .reboot { expectsReboot = true }
         let token = command.acknowledgementToken
         commandState[token] = .sending
         append(command.wire, kind: .outgoing)

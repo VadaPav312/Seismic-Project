@@ -85,7 +85,16 @@ public enum Firmware {
         case telemetry(Telemetry)
 
         /// A live sample for the seismograph, about ten a second.
-        case acceleration(deviation: Int, ratio: Double)
+        /// One acceleration sample, in raw MPU counts with gravity removed
+        /// from each axis. 16384 counts is one g at the ±2 g range the
+        /// firmware configures.
+        ///
+        /// Three axes rather than a magnitude. The board always read all
+        /// three; only the scalar was ever sent, because that is what its own
+        /// detector runs on — which left two of the phone's three traces flat
+        /// at zero and gave everything directional (polarisation, the bearing
+        /// to an epicentre) nothing to work with.
+        case acceleration(x: Int, y: Int, z: Int, ratio: Double)
 
         /// An event was declared, with the votes that caused it.
         case triggered(ratio: Double, votes: Votes, isDrill: Bool)
@@ -94,6 +103,11 @@ public enum Firmware {
         case phase(Phase)
 
         case actuator(device: Actuator, state: ActuatorState)
+        /// How far through its travel the stepper is, and through how many
+        /// degrees. Sent about twenty times across a move, so a valve closing
+        /// over six seconds is watchable rather than a six-second silence
+        /// followed by a claim that it is shut.
+        case stepperProgress(percent: Int, degrees: Int)
 
         /// The light readings behind a confirmation.
         case verification(device: Actuator, before: Int, after: Int, confirmed: Bool)
@@ -322,7 +336,15 @@ public enum Firmware {
                 triggerThreshold: Double(int("thr", 40)) / 10))
 
         case "acc":
-            return .acceleration(deviation: int("v"), ratio: Double(int("r", 100)) / 100)
+            // `v` is the older single-magnitude form. Accepted so a board that
+            // has not been re-flashed still shows a trace instead of a flat
+            // line, rather than being silently unsupported.
+            if object["x"] == nil, object["v"] != nil {
+                return .acceleration(x: int("v"), y: 0, z: 0,
+                                     ratio: Double(int("r", 100)) / 100)
+            }
+            return .acceleration(x: int("x"), y: int("y"), z: int("z"),
+                                 ratio: Double(int("r", 100)) / 100)
 
         case "trig":
             return .triggered(
@@ -386,6 +408,9 @@ public enum Firmware {
             return .calibrated(gravity: int("grav"), soundBaseline: int("snd"),
                                periodMilliseconds: int("per"))
 
+        case "step":
+            return .stepperProgress(percent: int("p"), degrees: int("deg"))
+
         case "note":
             return .note((object["m"] as? String) ?? "")
 
@@ -423,6 +448,13 @@ public enum Firmware {
         case disarm
         case calibrate
         case reset
+        /// Restarts the microcontroller outright.
+        ///
+        /// Distinct from `reset`, which puts the actuators back and clears the
+        /// state machine — that is a tidy-up, and it runs the very code you no
+        /// longer trust when the board has wedged. This is the power cycle you
+        /// would otherwise do by pulling the USB lead.
+        case reboot
         case resendRecording
         /// Re-send one chunk by index.
         ///
@@ -457,6 +489,7 @@ public enum Firmware {
             case .disarm: "DISARM"
             case .calibrate: "CAL"
             case .reset: "RESET"
+            case .reboot: "REBOOT"
             case .resendRecording: "SEND"
             case .resendChunk(let index): "REC:\(index)"
             case .status: "STATUS"

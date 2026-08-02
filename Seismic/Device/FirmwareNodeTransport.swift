@@ -57,14 +57,8 @@ final class FirmwareNodeTransport: NodeTransport, @unchecked Sendable {
 
     private var cancellables: Set<AnyCancellable> = []
 
-    /// The firmware reports acceleration as a single scalar deviation rather
-    /// than three axes — it is what its detector runs on. Presented on the
-    /// horizontal axis, with the others left at zero rather than invented,
-    /// because a fabricated Y and Z would flow into the polarisation and
-    /// bearing estimates and produce confident answers about a direction the
-    /// node never measured.
     private var sequence: UInt16 = 0
-    private var pending: [Double] = []
+    private var pending: [SeismicNodeLink.Axes] = []
     private static let batchSize = 3
 
     /// The rate the firmware streams live samples at, in hertz.
@@ -118,8 +112,8 @@ final class FirmwareNodeTransport: NodeTransport, @unchecked Sendable {
             .sink { [weak self] state in self?.emit(.connectionChanged(state)) }
             .store(in: &cancellables)
 
-        link.$trace
-            .sink { [weak self] trace in self?.forwardMotion(trace) }
+        link.$axes
+            .sink { [weak self] axes in self?.forwardMotion(axes) }
             .store(in: &cancellables)
 
         link.$telemetry
@@ -168,19 +162,19 @@ final class FirmwareNodeTransport: NodeTransport, @unchecked Sendable {
     private var forwardedCount = 0
 
     @MainActor
-    private func forwardMotion(_ trace: [Double]) {
+    private func forwardMotion(_ samples: [SeismicNodeLink.Axes]) {
         // The window is capped, so it shrinks from the front as it fills. Once
         // it is at capacity the count stops growing and the only safe reading
         // is the newest sample.
-        let fresh: [Double]
-        if trace.count > forwardedCount {
-            fresh = Array(trace.suffix(trace.count - forwardedCount))
-        } else if let last = trace.last, forwardedCount > 0 {
+        let fresh: [SeismicNodeLink.Axes]
+        if samples.count > forwardedCount {
+            fresh = Array(samples.suffix(samples.count - forwardedCount))
+        } else if let last = samples.last, forwardedCount > 0 {
             fresh = [last]
         } else {
             fresh = []
         }
-        forwardedCount = trace.count
+        forwardedCount = samples.count
         guard !fresh.isEmpty else { return }
 
         pending.append(contentsOf: fresh)
@@ -189,9 +183,9 @@ final class FirmwareNodeTransport: NodeTransport, @unchecked Sendable {
             pending.removeFirst(Self.batchSize)
             sequence &+= 1
             emit(.highRate(HighRateBatch(sequence: sequence, sampleRate: Self.liveStreamRate,
-                                         x: batch,
-                                         y: [Double](repeating: 0, count: batch.count),
-                                         z: [Double](repeating: 0, count: batch.count))))
+                                         x: batch.map(\.x),
+                                         y: batch.map(\.y),
+                                         z: batch.map(\.z))))
         }
     }
 

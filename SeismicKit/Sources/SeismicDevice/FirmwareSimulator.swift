@@ -82,11 +82,22 @@ public final class FirmwareSimulator: @unchecked Sendable {
             advanceQuiet(deltaTime: deltaTime)
         }
 
-        // Ten acceleration samples a second, as `streamDivider` produces.
-        if now - lastAccelAt >= 0.1 {
+        // Five acceleration samples a second, three axes, exactly as
+        // `STREAM_HZ` and `sendAccel` produce. The rate is not arbitrary and
+        // must not drift from the firmware's: everything downstream derives a
+        // period from it, and a simulator running at a different rate would
+        // quietly validate screens against numbers the board never sends.
+        if now - lastAccelAt >= 0.2 {
             lastAccelAt = now
             if state == .monitoring || state == .disarmed {
-                emit(#"{"t":"acc","v":\#(Int(currentDeviation)),"r":\#(Int(ratio * 100))}"#)
+                // Horizontal-dominant, as ground motion is: the vertical
+                // component of a shallow earthquake is real but smaller, and
+                // the two horizontals are not in phase with each other.
+                let scalar = currentDeviation
+                let x = Int(scalar)
+                let y = Int(scalar * 0.62 * sin(now * 4.7))
+                let z = Int(scalar * 0.34 * sin(now * 7.1 + 1.2))
+                emit(#"{"t":"acc","x":\#(x),"y":\#(y),"z":\#(z),"r":\#(Int(ratio * 100))}"#)
             }
         }
 

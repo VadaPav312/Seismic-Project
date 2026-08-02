@@ -28,6 +28,7 @@
    ============================================================================ */
 
 #include <Wire.h>
+#include <avr/wdt.h>
 
 /* ============================ PINS ====================================== */
 #define PIN_RGB_R        5
@@ -67,14 +68,14 @@ const uint32_t SAMPLE_PERIOD_US = 1000000UL / SAMPLE_HZ;
    drop data — it blocks, inside the sampling loop, which is worse.
 
      telemetry   ~128 bytes  x 1 Hz            = 128 B/s
-     acceleration  ~31 bytes x STREAM_HZ
+     acceleration  ~51 bytes x STREAM_HZ        (three axes)
      a recording ~161 bytes  x 25 chunks       = 4025 B, about 4.2 s
 
    At STREAM_HZ = 10 the steady state was 438 B/s, or 46% of the link, and a
    128-byte telemetry line does not fit in the AVR's 64-byte transmit buffer
    — so once a second the sampler stalled for ~66 ms waiting on the radio.
-   At 5 Hz it is 283 B/s, under a third, and telemetry is the only thing that
-   ever has to wait.
+   At 5 Hz with all three axes it is 383 B/s, two fifths, and telemetry is the
+   only thing that ever has to wait.
 
    Halving the stream costs nothing real: the detector runs on all 50 Hz on
    the board, and the ten seconds an assessment is actually made from is
@@ -87,7 +88,7 @@ const uint8_t  STREAM_DIVIDER    = SAMPLE_HZ / STREAM_HZ;
 
 /* Measured lengths of the two lines that are sent continuously. */
 const uint16_t TELEMETRY_BYTES = 128;
-const uint16_t ACCEL_BYTES     = 31;
+const uint16_t ACCEL_BYTES     = 51;   /* three axes */
 
 /* The budget, checked by the compiler rather than remembered.
    Raising STREAM_HZ or adding a field to the telemetry line is exactly the
@@ -110,8 +111,18 @@ uint16_t       SOUND_DELTA      = 60;
 const uint8_t  COUNTDOWN_START  = 5;
 const uint16_t ACTUATOR_GAP_MS  = 800;      /* USB power: one motor at a time */
 
-uint16_t       STEP_COUNT       = 1024;
-uint16_t       STEP_DELAY_US    = 3000;
+/* A 28BYJ-48 driven through the eight-phase half-step sequence below takes
+   4096 steps to turn its output shaft once — 64 half-steps per electrical
+   revolution through a 64:1 gearbox. The old 1024 was therefore a quarter
+   turn, which on a valve handle is ambiguous to look at and easy to mistake
+   for a twitch. A whole revolution is unmistakable from across a room.
+
+   3000 µs a step would make that take twelve seconds. 1400 is inside what
+   these motors pull reliably at 5 V and brings a full turn to about six
+   seconds, which is long enough to watch and short enough to hold a room. */
+const uint16_t STEPS_PER_REV    = 4096;
+uint16_t       STEP_COUNT       = STEPS_PER_REV;
+uint16_t       STEP_DELAY_US    = 1400;
 uint16_t       PHOTO_THRESHOLD  = 600;      /* set from your own readings */
 bool           stepperEnabled   = true;
 
@@ -128,6 +139,15 @@ NodeState state = ST_BOOT;
 
 float    sta = 0, lta = 100, ratio = 1.0f;
 float    gravityMag = 16384.0f;
+
+/* The accelerometer's reading at rest, per axis.
+   Gravity is a constant 1 g pointing down, and which axes it lands on depends
+   entirely on how the board is mounted — flat on a desk, screwed to a wall,
+   upside down under a joist. Subtracting a single magnitude cannot remove it
+   from a vector, so the resting orientation is learned during calibration and
+   subtracted axis by axis. Defaults assume the board lying flat, which is how
+   it is on a bench before anybody calibrates. */
+float    restX = 0.0f, restY = 0.0f, restZ = 16384.0f;
 uint16_t soundBaseline = 0;
 int16_t  ax, ay, az;
 
@@ -248,6 +268,12 @@ void rgbBlue()  { rgb(0,0,160);   }
 void rgbOff()   { rgb(0,0,0);     }
 
 /* ============================ STEPPER =================================== */
+/* Declared here because `stepMove` polls it and the definition is four
+   hundred lines further down. The IDE usually generates these prototypes
+   itself; it does not always manage it, and a missing one fails the build
+   with an error that points at the caller rather than the cause. */
+void pollCommands();
+
 const uint8_t STEP_SEQ[8][4] = {
   {1,0,0,0},{1,1,0,0},{0,1,0,0},{0,1,1,0},
   {0,0,1,0},{0,0,1,1},{0,0,0,1},{1,0,0,1}
@@ -258,8 +284,16 @@ void coilsOff() {
   digitalWrite(PIN_STEP_IN3, LOW); digitalWrite(PIN_STEP_IN4, LOW);
 }
 
+/* Reports how far through the turn it is, roughly twenty times across the
+   move, so the phone can show the valve closing while it closes rather than
+   going blank for six seconds and then claiming it is shut. Commands are
+   polled in the same place: a six-second move that ignored the radio would
+   mean the one moment somebody wants to press stop is the one moment nothing
+   is listening. */
 void stepMove(uint16_t steps, int8_t dir) {
   static uint8_t phase = 0;
+  const uint16_t report = steps / 20 ? steps / 20 : 1;
+
   for (uint16_t i = 0; i < steps; i++) {
     phase = (phase + (dir > 0 ? 1 : 7)) & 0x07;
     digitalWrite(PIN_STEP_IN1, STEP_SEQ[phase][0]);
@@ -267,7 +301,19 @@ void stepMove(uint16_t steps, int8_t dir) {
     digitalWrite(PIN_STEP_IN3, STEP_SEQ[phase][2]);
     digitalWrite(PIN_STEP_IN4, STEP_SEQ[phase][3]);
     delayMicroseconds(STEP_DELAY_US);
+
+    if ((i % report) == 0) {
+      snprintf(txbuf, sizeof(txbuf),
+               "{\"t\":\"step\",\"p\":%d,\"deg\":%d}",
+               (int)((uint32_t)i * 100 / steps),
+               (int)((uint32_t)i * 360 / STEPS_PER_REV));
+      say(txbuf);
+      pollCommands();
+    }
   }
+  snprintf(txbuf, sizeof(txbuf), "{\"t\":\"step\",\"p\":100,\"deg\":%d}",
+           (int)((uint32_t)steps * 360 / STEPS_PER_REV));
+  say(txbuf);
   coilsOff();                    /* CRITICAL on USB power */
 }
 
@@ -312,8 +358,23 @@ void sendTelemetry() {
   say(txbuf);
 }
 
-void sendAccel(int16_t v) {
-  snprintf(txbuf, sizeof(txbuf), "{\"t\":\"acc\",\"v\":%d,\"r\":%d}", v, (int)(ratio*100));
+/* All three axes, not just the magnitude.
+   The MPU has always read ax, ay and az; only the scalar deviation was ever
+   sent, because that is what the on-board detector runs on. The phone wants
+   the vector: two of its three traces were flat at zero, and everything that
+   depends on direction — polarisation, the bearing to the epicentre, which
+   way a building is being pushed — had nothing to work with.
+
+   Gravity is removed from the vertical rather than from the magnitude, so
+   what is sent is the deviation from rest on each axis. Twelve more bytes a
+   line, which the budget above has room for. */
+void sendAccel() {
+  snprintf(txbuf, sizeof(txbuf),
+           "{\"t\":\"acc\",\"x\":%d,\"y\":%d,\"z\":%d,\"r\":%d}",
+           (int)constrain(ax - restX, -32000, 32000),
+           (int)constrain(ay - restY, -32000, 32000),
+           (int)constrain(az - restZ, -32000, 32000),
+           (int)(ratio*100));
   say(txbuf);
 }
 
@@ -489,9 +550,17 @@ void calibrate() {
   sendPhase("calibrating");
   say("{\"t\":\"note\",\"m\":\"calibrating - keep the surface still\"}");
 
-  double sum = 0;
-  for (uint16_t i = 0; i < 200; i++) { mpuRead(); sum += accelMag(); delay(5); }
+  double sum = 0, sx = 0, sy = 0, sz = 0;
+  for (uint16_t i = 0; i < 200; i++) {
+    mpuRead();
+    sum += accelMag();
+    sx += ax; sy += ay; sz += az;
+    delay(5);
+  }
   gravityMag = sum / 200.0;
+  /* The orientation as well as the magnitude, so gravity can be taken off
+     each axis rather than only off the total. */
+  restX = sx / 200.0; restY = sy / 200.0; restZ = sz / 200.0;
 
   uint32_t ssum = 0;
   for (uint16_t i = 0; i < 200; i++) { ssum += analogRead(PIN_SOUND); delay(2); }
@@ -613,6 +682,23 @@ void handleCommand(char *c) {
     ack("RESET"); resetActuators();
     state = ST_MONITOR; rgbGreen(); dispOK(); sendPhase("monitoring");
   }
+  else if (!strcmp(c, "REBOOT")) {
+    /* A genuine restart, not a tidy-up. RESET puts the actuators back and
+       clears the state machine; this reboots the microcontroller, which is
+       what you want when it has wedged and the tidy-up is exactly the code
+       you no longer trust.
+
+       Announced first, because the app treats an unexpected boot line as a
+       brownout — the board restarting mid-event is a real fault and must
+       never be mistaken for one that was asked for. */
+    ack("REBOOT");
+    say("{\"t\":\"note\",\"m\":\"rebooting on request\"}");
+    Serial1.flush();
+    coilsOff();                  /* never leave a coil energised across a reset */
+    digitalWrite(PIN_POWERCUT, HIGH);
+    wdt_enable(WDTO_15MS);
+    for (;;) {}                  /* the watchdog takes it from here */
+  }
   else if (!strcmp(c, "SEND"))   { ack("SEND"); sendRecording(); }
   else if (!strncmp(c, "REC:", 4)) {
     /* Re-send one chunk. The app asks for exactly the ones that went missing
@@ -724,8 +810,7 @@ void loop() {
 
     if (++streamDivider >= STREAM_DIVIDER) {
       streamDivider = 0;
-      if (state == ST_MONITOR || state == ST_DISARMED)
-        sendAccel((int16_t)constrain(accelMag() - gravityMag, -32000, 32000));
+      if (state == ST_MONITOR || state == ST_DISARMED) sendAccel();
     }
 
     if (state == ST_MONITOR && fusionSaysEvent()) {

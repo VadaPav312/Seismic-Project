@@ -25,6 +25,8 @@ struct DeviceControlScreen: View {
     @State private var stepDelay: Double = 3000
     @State private var photoThreshold: Double = 600
     @State private var hasLoadedTuning = false
+    /// Whether the commentary shows the wire or the words.
+    @AppStorage("device.showsRawProtocol") private var showsRaw = false
 
     var body: some View {
         ScrollView {
@@ -198,43 +200,119 @@ struct DeviceControlScreen: View {
     /// bottom, so it reads downwards like a transcript rather than jumping.
     @ViewBuilder
     private var commentaryCard: some View {
-        if !link.commentary.isEmpty {
+        if !link.commentary.isEmpty || (showsRaw && !link.log.isEmpty) {
             VStack(alignment: .leading, spacing: Theme.Metrics.s4) {
                 HStack {
-                    SectionLabel("Live commentary", systemImage: "text.bubble")
+                    SectionLabel(showsRaw ? "Raw protocol" : "Live commentary",
+                                 systemImage: showsRaw ? "curlybraces" : "text.bubble")
                     Spacer()
                     if link.isEventRunning {
                         StatusPill(text: "LIVE", tint: Theme.Palette.verdictRed)
                     }
-                    // Reads back the last few lines rather than the whole feed:
-                    // by the time somebody presses this the interesting part is
-                    // what just happened, and a minute of history read from the
-                    // beginning is a minute during which the node does more.
-                    SpeakButton(link.commentary.suffix(5).map(\.text).joined(separator: " "),
-                                compact: true)
+                    if !showsRaw {
+                        // Reads back the last few lines rather than the whole
+                        // feed: by the time somebody presses this the
+                        // interesting part is what just happened, and a minute
+                        // of history read from the beginning is a minute
+                        // during which the node does more.
+                        SpeakButton(link.commentary.suffix(5).map(\.text).joined(separator: " "),
+                                    compact: true)
+                    }
+                    rawToggle
                 }
 
-                ScrollViewReader { proxy in
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: Theme.Metrics.s4) {
-                            ForEach(link.commentary) { line in
-                                commentaryLine(line).id(line.id)
-                            }
-                        }
-                        .padding(.vertical, Theme.Metrics.s1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                if showsRaw { rawFeed } else { plainFeed }
+
+                Text(showsRaw
+                     ? "Every line exactly as it arrives over the radio, newest first. This is "
+                       + "the protocol in arduino.ino — newline-delimited JSON in, plain text "
+                       + "commands out."
+                     : "The same stream, read a second time in plain English. A sentence "
+                       + "appears only when something changed.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .instrumentPanel()
+        }
+    }
+
+    /// Words or wire.
+    ///
+    /// The plain reading is the default because it is the one that means
+    /// anything to somebody who has not read the firmware. The raw feed is one
+    /// tap away rather than hidden, because the first question anybody
+    /// technical asks about a narrated stream is whether it is really coming
+    /// off the board — and the only satisfying answer is the bytes.
+    private var rawToggle: some View {
+        Button {
+            withAnimation(Theme.Motion.quick) { showsRaw.toggle() }
+            Haptics.shared.play(.selection)
+        } label: {
+            Label(showsRaw ? "Plain" : "Raw",
+                  systemImage: showsRaw ? "text.bubble" : "curlybraces")
+                .font(Theme.Typography.label)
+                .foregroundStyle(Theme.Palette.accent)
+                .padding(.horizontal, Theme.Metrics.s3)
+                .frame(height: 30)
+                .background(Capsule(style: .continuous).fill(Theme.Palette.accentDim))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(showsRaw ? "Show the plain reading" : "Show the raw protocol")
+    }
+
+    private var plainFeed: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: Theme.Metrics.s4) {
+                    ForEach(link.commentary) { line in
+                        commentaryLine(line).id(line.id)
                     }
-                    .frame(height: 260)
-                    .onChange(of: link.commentary.count) { _, _ in
-                        guard let last = link.commentary.last else { return }
-                        withAnimation(Theme.Motion.gentle) {
-                            proxy.scrollTo(last.id, anchor: .bottom)
-                        }
+                }
+                .padding(.vertical, Theme.Metrics.s1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .frame(height: 260)
+            .onChange(of: link.commentary.count) { _, _ in
+                guard let last = link.commentary.last else { return }
+                withAnimation(Theme.Motion.gentle) { proxy.scrollTo(last.id, anchor: .bottom) }
+            }
+        }
+    }
+
+    /// The wire, newest first.
+    private var rawFeed: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(link.log.prefix(120)) { entry in
+                    HStack(alignment: .top, spacing: Theme.Metrics.s2) {
+                        Text(entry.kind == .outgoing ? "▲" : "▼")
+                            .font(.system(size: 9))
+                            .foregroundStyle(entry.kind == .outgoing
+                                             ? Theme.Palette.accentSecondary
+                                             : Theme.Palette.textGhost)
+                            .padding(.top, 3)
+                        Text(entry.text)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(colour(for: entry.kind))
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
                     }
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .instrumentPanel()
+        }
+        .frame(height: 260)
+    }
+
+    private func colour(for kind: SeismicNodeLink.LogEntry.Kind) -> Color {
+        switch kind {
+        case .incoming: Theme.Palette.textSecondary
+        case .outgoing: Theme.Palette.accentSecondary
+        case .note: Theme.Palette.textTertiary
+        case .fault: Theme.Palette.verdictAmber
         }
     }
 
@@ -312,6 +390,10 @@ struct DeviceControlScreen: View {
                      isDone: link.actuators[.power] == .confirmed,
                      isActive: link.actuators[.power] == .commanded)
 
+                if let progress = link.stepperProgress {
+                    valveDial(progress)
+                }
+
                 step(4, "Water main closed",
                      detail: waterDetail,
                      isDone: link.actuators[.water] == .confirmed,
@@ -358,6 +440,50 @@ struct DeviceControlScreen: View {
             ? "Confirmed — light went \(verification.before) → \(verification.after)"
             : "Not confirmed — light barely moved (\(verification.before) → "
                 + "\(verification.after))"
+    }
+
+    /// The valve turning, as it turns.
+    ///
+    /// A full revolution of a 28BYJ-48 is 4096 half-steps and takes about six
+    /// seconds. Six seconds is a long time to show nothing and then assert the
+    /// valve is shut — the whole argument of this screen is that a command
+    /// which was sent is a rumour, and a blank pause followed by a claim is the
+    /// same rumour with better manners. The firmware reports its progress about
+    /// twenty times across the move; this is that.
+    private func valveDial(_ progress: Int) -> some View {
+        HStack(spacing: Theme.Metrics.s5) {
+            ZStack {
+                Circle()
+                    .stroke(Theme.Palette.glassStrong, lineWidth: 6)
+                Circle()
+                    .trim(from: 0, to: CGFloat(progress) / 100)
+                    .stroke(Theme.Palette.accent,
+                            style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+                Image(systemName: "drop.fill")
+                    .font(.system(size: 16))
+                    .foregroundStyle(Theme.Palette.accent)
+                    // Turning with the valve, so the motion on screen is the
+                    // motion on the bench.
+                    .rotationEffect(.degrees(Double(link.stepperDegrees)))
+            }
+            .frame(width: 62, height: 62)
+            .animation(Theme.Motion.quick, value: progress)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Turning the water valve")
+                    .font(Theme.Typography.headline)
+                    .foregroundStyle(Theme.Palette.textPrimary)
+                Text("\(link.stepperDegrees)° of 360 · \(progress)%")
+                    .font(Theme.Typography.numeric)
+                    .foregroundStyle(Theme.Palette.accent)
+                Text("A full revolution of the handle, 4096 half-steps.")
+                    .font(Theme.Typography.caption)
+                    .foregroundStyle(Theme.Palette.textTertiary)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.vertical, Theme.Metrics.s2)
     }
 
     private var waterDetail: String {
@@ -601,6 +727,19 @@ struct DeviceControlScreen: View {
                               command: .resendRecording)
                 commandButton("Refresh", systemImage: "arrow.clockwise", command: .status)
             }
+            HStack(spacing: Theme.Metrics.spacing) {
+                commandButton("Restart the board", systemImage: "bolt.circle",
+                              command: .reboot, tint: Theme.Palette.verdictAmber)
+                Color.clear.frame(maxWidth: .infinity)
+            }
+
+            Text("Reset puts the actuators back and clears the state machine. Restart reboots "
+                 + "the microcontroller outright — the same thing as pulling the USB lead, and "
+                 + "what you want when the board has wedged and the tidy-up is the code you no "
+                 + "longer trust. It comes back in about two seconds and reconnects on its own.")
+                .font(Theme.Typography.caption)
+                .foregroundStyle(Theme.Palette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
 
             if link.telemetry?.state == .calibrating {
                 MeaningfulProgress(
@@ -806,7 +945,8 @@ struct DeviceControlScreen: View {
 
     private func commandButton(_ title: String, systemImage: String,
                                command: Firmware.Command,
-                               isProminent: Bool = false) -> some View {
+                               isProminent: Bool = false,
+                               tint: Color? = nil) -> some View {
         let state = link.state(of: command)
         return Button {
             Haptics.shared.play(.selection)
@@ -823,6 +963,7 @@ struct DeviceControlScreen: View {
                 }
                 CommandStateLabel(state: state, command: command.wire, compact: true)
             }
+            .foregroundStyle(tint ?? Theme.Palette.textPrimary)
             .frame(maxWidth: .infinity)
             .frame(minHeight: Theme.Metrics.minimumTapTarget)
         }

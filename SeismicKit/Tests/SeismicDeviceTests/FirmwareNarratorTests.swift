@@ -35,7 +35,7 @@ final class FirmwareNarratorTests: XCTestCase {
     func testAccelerationSamplesAreNeverNarrated() {
         var narrator = FirmwareNarrator()
         for value in 0..<100 {
-            XCTAssertTrue(narrator.narrate(.acceleration(deviation: value, ratio: 1.1)).isEmpty)
+            XCTAssertTrue(narrator.narrate(.acceleration(x: value, y: value / 2, z: 0, ratio: 1.1)).isEmpty)
         }
     }
 

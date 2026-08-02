@@ -44,6 +44,7 @@ final class FirmwareSimulatorTests: XCTestCase {
             case .countdown: "count"
             case .phase: "phase"
             case .actuator: "act"
+            case .stepperProgress: "step"
             case .verification: "verify"
             case .recordingBegan: "recbegin"
             case .recordingChunk: "rec"

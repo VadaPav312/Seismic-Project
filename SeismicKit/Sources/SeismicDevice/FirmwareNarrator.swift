@@ -63,6 +63,7 @@ public struct FirmwareNarrator: Sendable {
     private var hasDeclared = false
     private var hasWarnedAboutSingleChannel = false
     private var lastChunkAnnouncement = 0
+    private var lastStepperReport = 0
 
     /// The quiet sound level, learned from the first readings.
     ///
@@ -132,6 +133,20 @@ public struct FirmwareNarrator: Sendable {
             guard lastActuator[actuator] != state else { return [] }
             return narrateActuator(actuator, state)
 
+        case .stepperProgress(let percent, let degrees):
+            // Only the quarters. A line every time the valve moves five per
+            // cent would bury the four sentences that matter under twenty that
+            // do not — which is the failure this whole type exists to avoid.
+            // The progress bar on screen is the right place for the detail.
+            guard percent > 0, percent.isMultiple(of: 25),
+                  percent != lastStepperReport else { return [] }
+            lastStepperReport = percent
+            if percent >= 100 {
+                return [Line(text: "The valve has turned a full revolution. That is it closed.",
+                             tone: .good)]
+            }
+            return [Line(text: "Turning the valve — \(degrees) degrees round.", tone: .acting)]
+
         case .verification(let actuator, let before, let after, let confirmed):
             let noun = plainName(actuator)
             if confirmed {
@@ -192,6 +207,7 @@ public struct FirmwareNarrator: Sendable {
         hasDeclared = false
         hasWarnedAboutSingleChannel = false
         lastChunkAnnouncement = 0
+        lastStepperReport = 0
         soundFloor = nil
         soundSamples = 0
     }
