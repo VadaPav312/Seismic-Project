@@ -40,6 +40,10 @@ struct CommunityMapScreen: View {
     // Where the camera is, kept so a query can be made about it.
     @State private var centre = CLLocationCoordinate2D(latitude: 0, longitude: 0)
     @State private var radiusKm: Double = 25
+    /// Both collapsed to start with, because the first thing anybody wants
+    /// from a map is to see the map.
+    @State private var isSearchExpanded = false
+    @State private var areControlsExpanded = false
 
     // Seismic history: for the visible region, and for a tapped point.
     @State private var regionHistory: RegionalHistory?
@@ -218,25 +222,43 @@ struct CommunityMapScreen: View {
                 }
             }
 
+            // Collapsed until asked for.
+            //
+            // A search field, a layer picker, a summary bar and a legend all
+            // stacked over a map is a map you cannot see — on a phone the
+            // panels took most of the screen and the thing they describe was
+            // reduced to a strip in the middle. Each is a button until it is
+            // wanted, which is the whole point of putting them over a map
+            // rather than beside it.
             VStack(spacing: Theme.Metrics.spacing) {
-                searchBar
-                layerPicker
-                switch layer {
-                case .community: summaryBar
-                case .triage: triageBar
-                case .intensity: intensityBar
-                case .earthquakes: seismicityBar
+                if isSearchExpanded {
+                    searchBar
+                        .transition(.move(edge: .top).combined(with: .opacity))
+                }
+                controlStrip
+                if areControlsExpanded {
+                    layerPicker
+                    switch layer {
+                    case .community: summaryBar
+                    case .triage: triageBar
+                    case .intensity: intensityBar
+                    case .earthquakes: seismicityBar
+                    }
                 }
                 Spacer()
-                switch layer {
-                case .community: timeSlider
-                case .triage: triageList
-                case .intensity: intensityLegend
-                case .earthquakes: historyHint
+                if areControlsExpanded {
+                    switch layer {
+                    case .community: timeSlider
+                    case .triage: triageList
+                    case .intensity: intensityLegend
+                    case .earthquakes: historyHint
+                    }
                 }
             }
             .padding(Theme.Metrics.screenPadding)
             .contentColumn()
+            .animation(Theme.Motion.standard, value: isSearchExpanded)
+            .animation(Theme.Motion.standard, value: areControlsExpanded)
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
@@ -538,6 +560,56 @@ struct CommunityMapScreen: View {
     }
 
     // MARK: Layers, search and inspection
+
+    /// The two buttons that are always there, and nothing else.
+    ///
+    /// Sized to a tap target and no wider than their labels, so the map behind
+    /// them stays a map. The current layer is named on the second one, because
+    /// once the picker is collapsed that is the only way to know which one is
+    /// showing.
+    private var controlStrip: some View {
+        HStack(spacing: Theme.Metrics.s3) {
+            Button {
+                isSearchExpanded.toggle()
+                if !isSearchExpanded { searchText = ""; searchResults = [] }
+                Haptics.shared.play(.selection)
+            } label: {
+                Label("Search", systemImage: "magnifyingglass")
+                    .labelStyle(.iconOnly)
+                    .font(.system(size: 15, weight: .semibold))
+                    .frame(width: 44, height: 40)
+                    .foregroundStyle(isSearchExpanded ? Theme.Palette.accent
+                                                      : Theme.Palette.textPrimary)
+                    .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isSearchExpanded ? "Close search" : "Search anywhere")
+
+            Button {
+                areControlsExpanded.toggle()
+                Haptics.shared.play(.selection)
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: layer.systemImage)
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(layer.label)
+                        .font(Theme.Typography.callout.weight(.medium))
+                    Image(systemName: areControlsExpanded ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(Theme.Palette.textTertiary)
+                }
+                .foregroundStyle(Theme.Palette.textPrimary)
+                .padding(.horizontal, 14)
+                .frame(height: 40)
+                .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(areControlsExpanded
+                                ? "Hide map controls" : "Show map controls, currently \(layer.label)")
+
+            Spacer(minLength: 0)
+        }
+    }
 
     private var layerPicker: some View {
         Picker("Layer", selection: $layer) {

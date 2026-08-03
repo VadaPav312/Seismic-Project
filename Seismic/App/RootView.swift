@@ -237,6 +237,19 @@ struct RootView: View {
         .animation(Theme.Motion.gentle, value: env.isBootstrapped)
         .animation(Theme.Motion.gentle, value: env.didCompleteOnboarding)
         .animation(Theme.Motion.gentle, value: services.account == nil)
+        // Signing out has to actually land you on the sign-in page.
+        //
+        // The gate below already switches to `AuthSheet` the moment the account
+        // goes nil — but Account lives inside a full-screen cover, and a cover
+        // is above the whole stack. So the login page appeared underneath one,
+        // and the app looked like it had ignored the tap. Closing the cover is
+        // what makes the state change visible.
+        .onChange(of: services.account == nil) { _, isSignedOut in
+            guard isSignedOut else { return }
+            presented = nil
+            isBloomOpen = false
+            selection = .home
+        }
         // A recognised command is consumed here rather than in each screen, so
         // "show the map" works from wherever the user happens to be.
         .onChange(of: voice.recognisedCommand) { _, command in
@@ -325,8 +338,11 @@ struct RootView: View {
         case .measureNow:
             env.session.send(.requestPeriodMeasurement)
             show(.monitor)
-        case .closeGas:
-            env.session.send(.fireActuator(.mainsPower))
+        case .callForHelp:
+            // Straight through, with no confirmation dialog in the way. This
+            // is the command somebody uses when they cannot work a screen.
+            Haptics.shared.play(.eventTriggered)
+            env.placeEmergencyCall()
         case .callHousehold:
             show(.household)
         case .showMap:
@@ -447,6 +463,24 @@ struct RootView: View {
         // It is the one destination people go looking for by habit, and hiding
         // the habitual thing behind a menu is how an app earns a reputation for
         // being hard to use.
+        // Next to Settings and on every screen, because the moment somebody
+        // needs it is not a moment they can go looking for it. Hold-free: one
+        // tap starts listening, and saying "help" places the call.
+        ToolbarItem(placement: .topBarTrailing) {
+            Button {
+                Haptics.shared.play(.selection)
+                if voice.isListening { voice.stopListening() } else { voice.startListening() }
+            } label: {
+                Image(systemName: voice.isListening ? "mic.fill" : "mic")
+                    .foregroundStyle(voice.isListening ? Theme.Palette.verdictRed
+                                                       : Theme.Palette.accent)
+                    .symbolEffect(.pulse, isActive: voice.isListening)
+            }
+            .accessibilityLabel(voice.isListening
+                                ? "Stop listening"
+                                : "Say help to call emergency services")
+        }
+
         ToolbarItem(placement: .topBarTrailing) {
             Button {
                 Haptics.shared.play(.selection)

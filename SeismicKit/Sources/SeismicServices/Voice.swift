@@ -217,11 +217,16 @@ public actor SpeechService {
 /// microphone. Matching is fuzzy on purpose — somebody shouting at a phone
 /// during an earthquake will not enunciate.
 public enum VoiceCommand: String, Sendable, CaseIterable, Identifiable {
+    /// The one command somebody shouts rather than says.
+    ///
+    /// Kept first because it is the only one on this list that matters when a
+    /// person cannot reach their phone properly — trapped, injured, or holding
+    /// something with both hands. Everything else here is a convenience.
+    case callForHelp
     case status
     case isItSafe
     case startDrill
     case measureNow
-    case closeGas
     case callHousehold
     case readAssessment
     case stopSpeaking
@@ -231,11 +236,13 @@ public enum VoiceCommand: String, Sendable, CaseIterable, Identifiable {
 
     public var spokenExamples: [String] {
         switch self {
+        case .callForHelp: ["help", "help me", "i need help", "call for help",
+                            "call emergency", "call nine one one", "call 911",
+                            "emergency", "send help"]
         case .status: ["status", "what's happening", "report"]
         case .isItSafe: ["is it safe", "am i safe", "can i go in", "is the building safe"]
         case .startDrill: ["start a drill", "run a drill", "practise", "practice"]
         case .measureNow: ["measure now", "take a measurement", "check the building"]
-        case .closeGas: ["close the gas", "shut off the gas", "gas off"]
         case .callHousehold: ["call my household", "check on everyone", "alert my family"]
         case .readAssessment: ["read the assessment", "read it out", "what does it say"]
         case .stopSpeaking: ["stop", "be quiet", "stop talking"]
@@ -245,11 +252,11 @@ public enum VoiceCommand: String, Sendable, CaseIterable, Identifiable {
 
     public var confirmation: String {
         switch self {
+        case .callForHelp: "Calling emergency services."
         case .status: "Reading the current status."
         case .isItSafe: "Reading the latest assessment."
         case .startDrill: "Starting a drill. Nothing will actually fire."
         case .measureNow: "Measuring the building's period now."
-        case .closeGas: "Closing the gas valve."
         case .callHousehold: "Alerting your household."
         case .readAssessment: "Reading the assessment."
         case .stopSpeaking: ""
@@ -261,7 +268,11 @@ public enum VoiceCommand: String, Sendable, CaseIterable, Identifiable {
     /// before they run — a misheard word must not close somebody's gas supply.
     public var requiresConfirmation: Bool {
         switch self {
-        case .closeGas, .callHousehold: true
+        // Not `callForHelp`. Everything else that acts on the world asks
+        // first, because a misheard word must not do something irreversible —
+        // but making somebody confirm a call for help is exactly backwards.
+        // The call is reversible in one tap and the situation it is for is not.
+        case .callHousehold: true
         default: false
         }
     }
@@ -271,7 +282,10 @@ public enum VoiceCommand: String, Sendable, CaseIterable, Identifiable {
     public static func parse(_ heard: String, threshold: Double = 0.72) -> VoiceCommand? {
         let normalised = heard.lowercased()
             .trimmingCharacters(in: .whitespacesAndNewlines)
-            .filter { $0.isLetter || $0.isWhitespace || $0 == "'" }
+            // Digits kept. Speech recognition returns "call 911" with numerals,
+            // not words, and stripping them left "call " — which matches
+            // nothing. Punctuation still goes.
+            .filter { $0.isLetter || $0.isNumber || $0.isWhitespace || $0 == "'" }
         guard !normalised.isEmpty else { return nil }
 
         var best: (command: VoiceCommand, score: Double)?

@@ -578,7 +578,7 @@ final class VoiceTests: XCTestCase {
     func testCommandsParseFromNaturalPhrasing() {
         XCTAssertEqual(VoiceCommand.parse("is it safe"), .isItSafe)
         XCTAssertEqual(VoiceCommand.parse("uh, is it safe to go inside?"), .isItSafe)
-        XCTAssertEqual(VoiceCommand.parse("Shut off the gas"), .closeGas)
+        XCTAssertEqual(VoiceCommand.parse("Help me"), .callForHelp)
         XCTAssertEqual(VoiceCommand.parse("read it out"), .readAssessment)
     }
 
@@ -589,11 +589,23 @@ final class VoiceTests: XCTestCase {
         XCTAssertNil(VoiceCommand.parse(""))
     }
 
-    /// A misheard word must not be able to close somebody's gas supply.
+    /// A misheard word must not be able to wake somebody's whole household.
     func testPhysicalActionsRequireConfirmation() {
-        XCTAssertTrue(VoiceCommand.closeGas.requiresConfirmation)
         XCTAssertTrue(VoiceCommand.callHousehold.requiresConfirmation)
         XCTAssertFalse(VoiceCommand.status.requiresConfirmation)
+    }
+
+    /// Calling for help is the exception, and deliberately so.
+    ///
+    /// Every other command that acts on the world asks first. Making somebody
+    /// confirm a call for help is exactly backwards: the call is reversible
+    /// with one tap and the situation it is for is not, and the person saying
+    /// it may not be able to work a dialog at all.
+    func testCallingForHelpIsNotGatedBehindAConfirmation() {
+        XCTAssertFalse(VoiceCommand.callForHelp.requiresConfirmation)
+        for phrase in ["help", "help me", "I need help", "call 911", "send help"] {
+            XCTAssertEqual(VoiceCommand.parse(phrase), .callForHelp, phrase)
+        }
     }
 
     func testSpeechFallsBackToTheSystemVoiceWithoutAKey() async {
