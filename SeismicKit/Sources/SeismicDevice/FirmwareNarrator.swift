@@ -333,13 +333,6 @@ public struct FirmwareNarrator: Sendable {
             // fully a moment later; this is the immediate acknowledgement.
             return [Line(text: "\(noun.capitalisedFirst) is off.", tone: .good)]
         case .failed:
-            if actuator == .gas {
-                return [Line(text: "I can't close the gas valve. It isn't fitted — the board's "
-                                 + "500 mA budget won't run its servo alongside the water "
-                                 + "stepper, so it was left off rather than pretended at. "
-                                 + "Turn the gas off by hand.",
-                             tone: .bad, isSpoken: true)]
-            }
             return [Line(text: "I couldn't shut off \(noun). Do it by hand.",
                          tone: .bad, isSpoken: true)]
         case .idle:
@@ -396,7 +389,6 @@ public struct FirmwareNarrator: Sendable {
         switch actuator {
         case .power: "the building's power"
         case .water: "the water main"
-        case .gas: "the gas"
         }
     }
 }

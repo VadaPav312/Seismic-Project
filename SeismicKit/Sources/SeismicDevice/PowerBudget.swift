@@ -47,8 +47,14 @@ public struct PowerBudget: Sendable, Equatable {
     /// answer is no, and the app says so plainly rather than letting the user
     /// discover it during an event.
     public var allowsSimultaneousMotors: Bool {
-        let twoServos = ActuatorKind.gasValve.peakCurrent_mA + ActuatorKind.waterMain.peakCurrent_mA
-        return twoServos <= availableForActuation
+        // The gas valve that was dropped is the argument, and it belongs
+        // here rather than as an empty row on the actuator screen: a servo
+        // pulls about 240 mA turning a valve and the water stepper pulls 260,
+        // so two motors want 500 mA of a supply that has already spent 180 on
+        // the board itself. That is why this node closes water and cuts power
+        // and does not touch gas.
+        let twoMotors = 240.0 + ActuatorKind.waterMain.peakCurrent_mA
+        return twoMotors <= availableForActuation
     }
 
     public var explanation: String {
@@ -129,13 +135,9 @@ public struct ActuationPlanner: Sendable {
 
     private func reason(for kind: ActuatorKind, at index: Int) -> String {
         switch kind {
-        case .gasValve:
-            return "Gas first: a leak into a building with live electrics is the failure that "
-                + "kills people after the shaking stops."
         case .mainsPower:
-            return index == 0
-                ? "Cutting mains power removes the ignition source."
-                : "Mains power next, once the gas valve has confirmed closed."
+            return "Power first: live electrics in a building about to be flooded by a burst "
+                + "pipe is the failure that hurts people after the shaking stops."
         case .waterMain:
             return "Water last: a burst pipe causes damage but not casualties, and the valve "
                 + "draws the most current."

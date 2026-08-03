@@ -150,15 +150,15 @@ final class FirmwareProtocolTests: XCTestCase {
         XCTAssertTrue(ok)
     }
 
-    /// The gas valve is modelled and absent, and says why.
-    func testTheGasValveIsModelledAsUnavailableWithAReason() {
-        XCTAssertFalse(Firmware.Actuator.gas.isAvailableInFirmware)
-        XCTAssertTrue(Firmware.Actuator.power.isAvailableInFirmware)
-        XCTAssertTrue(Firmware.Actuator.water.isAvailableInFirmware)
-
-        let reason = Firmware.Actuator.gas.unavailableReason ?? ""
-        XCTAssertTrue(reason.contains("USB"), reason)
-        XCTAssertNil(Firmware.Actuator.power.unavailableReason)
+    /// The node has exactly two actuators, and both of them work.
+    ///
+    /// It used to carry a third that was permanently unavailable, so every
+    /// screen reasoned about a device that does not exist. Why there are two
+    /// is an argument about the current budget and belongs in `PowerBudget`,
+    /// where it can be made with numbers rather than as an empty row.
+    func testTheNodeHasTwoActuatorsAndBothAreAvailable() {
+        XCTAssertEqual(Set(Firmware.Actuator.allCases), [.power, .water])
+        XCTAssertTrue(Firmware.Actuator.allCases.allSatisfy(\.isAvailableInFirmware))
     }
 
     // MARK: Recording

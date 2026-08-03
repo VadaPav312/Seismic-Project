@@ -59,12 +59,21 @@ public enum ConnectionState: Equatable, Sendable {
 // MARK: - Actuators
 
 public enum ActuatorKind: String, Codable, Sendable, CaseIterable, Identifiable {
-    case gasValve, mainsPower, waterMain
+    /// Two, not three.
+    ///
+    /// A gas valve was modelled here and never fitted: a servo drawing 240 mA
+    /// alongside a stepper drawing 260 does not fit in a USB port's 500 mA
+    /// budget, so one actuator had to be shed. Carrying it as a permanently
+    /// unavailable case meant every screen, every priority list and every power
+    /// calculation reasoned about a device that does not exist, and every
+    /// demonstration had to explain why one of the three was greyed out. The
+    /// engineering position is in `PowerBudget`, where it is an argument rather
+    /// than an empty row.
+    case mainsPower, waterMain
     public var id: String { rawValue }
 
     public var label: String {
         switch self {
-        case .gasValve: "Gas valve"
         case .mainsPower: "Mains power"
         case .waterMain: "Water main"
         }
@@ -72,7 +81,6 @@ public enum ActuatorKind: String, Codable, Sendable, CaseIterable, Identifiable 
 
     public var actionVerb: String {
         switch self {
-        case .gasValve: "Close gas valve"
         case .mainsPower: "Cut mains power"
         case .waterMain: "Close water main"
         }
@@ -80,7 +88,6 @@ public enum ActuatorKind: String, Codable, Sendable, CaseIterable, Identifiable 
 
     public var systemImage: String {
         switch self {
-        case .gasValve: "flame"
         case .mainsPower: "bolt.horizontal"
         case .waterMain: "drop"
         }
@@ -90,7 +97,6 @@ public enum ActuatorKind: String, Codable, Sendable, CaseIterable, Identifiable 
     /// having been commanded. A command with no confirmation is a rumour.
     public var confirmation: ConfirmationMethod {
         switch self {
-        case .gasValve: .servoPositionFeedback
         case .mainsPower: .photoresistorLamp
         case .waterMain: .waterLevelSensor
         }
@@ -107,7 +113,6 @@ public enum ActuatorKind: String, Codable, Sendable, CaseIterable, Identifiable 
     /// still correctly forbids two at once, which is the constraint that matters.
     public var peakCurrent_mA: Double {
         switch self {
-        case .gasValve: 240
         case .mainsPower: 40        // a latching relay coil, and only briefly
         case .waterMain: 260
         }
@@ -116,19 +121,18 @@ public enum ActuatorKind: String, Codable, Sendable, CaseIterable, Identifiable 
     /// How long the motion takes, seconds.
     public var travelTime: TimeInterval {
         switch self {
-        case .gasValve: 1.4
         case .mainsPower: 0.2
         case .waterMain: 1.8
         }
     }
 
-    /// Order matters: gas first, because a gas leak into a building with live
-    /// electrics is the failure mode that kills people after the shaking stops.
+    /// Order matters: power first, because live electrics in a building that
+    /// is about to be flooded by a burst pipe is the failure mode that kills
+    /// people after the shaking stops.
     public var firingPriority: Int {
         switch self {
-        case .gasValve: 0
-        case .mainsPower: 1
-        case .waterMain: 2
+        case .mainsPower: 0
+        case .waterMain: 1
         }
     }
 }

@@ -178,7 +178,7 @@ final class PayloadCodingTests: XCTestCase {
     func testEveryCommandRoundTrips() {
         let commands: [NodeCommand] = [
             .selfTest, .calibrateBaseline, .setSensitivity(4.5), .drill(fireActuators: true),
-            .drill(fireActuators: false), .fireActuator(.gasValve), .resetActuator(.waterMain),
+            .drill(fireActuators: false), .fireActuator(.mainsPower), .resetActuator(.waterMain),
             .setLED(r: 1, g: 0.5, b: 0), .buzz(pattern: "SOS"),
             .playTone(frequency: 440, duration: 1.5), .setMatrixText("SAFE"),
             .setSevenSegment("12.3"), .setFloorStressPattern(0b1010_1010),
@@ -216,7 +216,7 @@ final class PayloadCodingTests: XCTestCase {
     }
 
     func testCommandsThatMoveMotorsAreIdentified() {
-        XCTAssertTrue(NodeCommand.fireActuator(.gasValve).movesMotor)
+        XCTAssertTrue(NodeCommand.fireActuator(.waterMain).movesMotor)
         XCTAssertTrue(NodeCommand.fireActuator(.waterMain).movesMotor)
         XCTAssertFalse(NodeCommand.fireActuator(.mainsPower).movesMotor,
                        "a relay is not a motor")
@@ -407,26 +407,40 @@ final class ChunkTransferTests: XCTestCase {
 
 final class PowerBudgetTests: XCTestCase {
 
-    func testUSBCannotCarryTwoServos() {
+    /// The reason the node has two actuators and not three.
+    ///
+    /// A servo turning a gas valve draws about 240 mA and the water stepper
+    /// draws 260, against a USB supply that has already spent 180 on the board.
+    /// This is that arithmetic, kept as a test rather than as a comment,
+    /// because it is the whole justification for the actuator that is missing.
+    func testUSBCannotCarryTwoMotorsAtOnce() {
         let budget = PowerBudget.usb2
         XCTAssertFalse(budget.allowsSimultaneousMotors)
-        XCTAssertFalse(budget.canRun(.waterMain, alongside: [.gasValve]))
-        // A relay is cheap enough to overlap with a servo.
-        XCTAssertTrue(budget.canRun(.mainsPower, alongside: [.gasValve]))
+        // A relay is cheap enough to overlap with the stepper; a second motor
+        // is not.
+        // 500 mA supply, 180 for the board, 60 held back against brownout —
+        // 260 left, which is exactly one stepper and nothing else. Even the
+        // relay does not fit alongside it, which is why the sequence is
+        // serialised rather than merely "no two servos".
+        XCTAssertTrue(budget.canRun(.waterMain, alongside: []))
+        XCTAssertFalse(budget.canRun(.mainsPower, alongside: [.waterMain]))
+        XCTAssertLessThan(budget.availableForActuation,
+                          240 + ActuatorKind.waterMain.peakCurrent_mA)
     }
 
-    func testPlanSerialisesTheMotorsAndOrdersGasFirst() {
+    func testPlanSerialisesTheMotorsAndCutsPowerFirst() {
         let planner = ActuationPlanner(budget: .usb2)
         let steps = planner.plan(ActuatorKind.allCases)
 
-        XCTAssertEqual(steps.count, 3)
-        XCTAssertEqual(steps[0].kind, .gasValve, "gas must be cut first")
+        XCTAssertEqual(steps.count, 2)
+        XCTAssertEqual(steps[0].kind, .mainsPower,
+                       "power must be cut first — live electrics in a building about to be "
+                       + "flooded is what hurts people after the shaking")
 
-        // The two servos must not overlap in time.
-        let gas = steps.first { $0.kind == .gasValve }!
+        let power = steps.first { $0.kind == .mainsPower }!
         let water = steps.first { $0.kind == .waterMain }!
-        XCTAssertTrue(water.startOffset >= gas.endOffset || gas.startOffset >= water.endOffset,
-                      "two servos were scheduled to move at the same time")
+        XCTAssertTrue(water.startOffset >= power.endOffset,
+                      "the two were scheduled to move at the same time")
     }
 
     func testPlanStaysWithinTheSupply() {
@@ -459,13 +473,13 @@ final class PowerBudgetTests: XCTestCase {
     func testSequenceSummaryReflectsProgress() {
         let steps = ActuationPlanner().plan(ActuatorKind.allCases)
         var sequence = ActuationSequence(steps: steps)
-        XCTAssertTrue(sequence.summary.contains("0 of 3"))
+        XCTAssertTrue(sequence.summary.contains("0 of 2"), sequence.summary)
 
         for kind in ActuatorKind.allCases {
             sequence.reports[kind] = ActuatorReport(kind: kind, state: .confirmed)
         }
         XCTAssertTrue(sequence.allConfirmed)
-        XCTAssertTrue(sequence.summary.contains("All 3"))
+        XCTAssertTrue(sequence.summary.contains("All 2"), sequence.summary)
 
         sequence.reports[.waterMain] = ActuatorReport(kind: .waterMain, state: .failed)
         XCTAssertTrue(sequence.anyFailed)
@@ -703,7 +717,7 @@ final class SimulatedNodeTests: XCTestCase {
 
     func testManualActuatorFireIsRefusedWhileAnotherMotorIsMoving() {
         let (node, recorder) = connectedNode()
-        node.send(.fireActuator(.gasValve))
+        node.send(.fireActuator(.mainsPower))
         node.tick(deltaTime: 0.1)
         recorder.clear()
         node.send(.fireActuator(.waterMain))

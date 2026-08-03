@@ -136,16 +136,12 @@ public enum Firmware {
 
     public enum Actuator: String, Sendable, CaseIterable, Identifiable {
         case power, water
-        /// Present in the model and absent from the hardware. See
-        /// `isAvailableInFirmware`.
-        case gas
         public var id: String { rawValue }
 
         public var label: String {
             switch self {
             case .power: "Building power"
             case .water: "Water main"
-            case .gas: "Gas valve"
             }
         }
 
@@ -153,29 +149,16 @@ public enum Firmware {
             switch self {
             case .power: "bolt.horizontal"
             case .water: "drop"
-            case .gas: "flame"
             }
         }
 
-        /// Whether this node can actually operate it.
-        ///
-        /// The gas valve is deliberately modelled and deliberately unavailable.
-        /// Hiding it would imply the system had never considered gas; showing
-        /// it greyed out with the reason states the engineering position, which
-        /// is that a five-hundred-milliamp budget cannot carry three motors and
-        /// something had to be shed.
-        public var isAvailableInFirmware: Bool { self != .gas }
-
-        public var unavailableReason: String? {
-            guard self == .gas else { return nil }
-            return "Not fitted on this node. The board runs on USB — about five hundred "
-                + "milliamps — and a servo drawing two hundred and fifty of them while a "
-                + "stepper draws another two hundred and sixty browns out the "
-                + "microcontroller mid-event. One actuator had to be shed, so the two that "
-                + "remain are electrical isolation and water: life safety first, property "
-                + "second. Gas isolation needs either a second supply or a latching valve "
-                + "that draws current only while it moves."
-        }
+        /// Both of them, always. The node has exactly the two actuators it
+        /// has, and there is no third that is present-but-disabled — carrying
+        /// one meant every screen reasoned about a device that does not exist
+        /// and every demonstration had to explain a greyed-out row. Why there
+        /// are two and not three is an argument about the current budget, and
+        /// it lives in `PowerBudget` where it can be made with numbers.
+        public var isAvailableInFirmware: Bool { true }
     }
 
     public enum Phase: String, Sendable, Equatable {

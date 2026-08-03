@@ -49,8 +49,23 @@ struct GlobalFeedScreen: View {
 
                     ForEach(feed.events) { event in
                         EarthquakeFeedRow(event: event) {
-                            env.selectedBuildingID = env.selectedBuilding?.id
+                            // It used to assign the already-selected building
+                            // to itself and play a haptic — a button that
+                            // looked like it did something and did nothing at
+                            // all. Now it asks for the simulator and hands it
+                            // the earthquake to run, matching a catalogue
+                            // record by magnitude where one is close enough
+                            // that playing it is honest.
                             Haptics.shared.play(.selection)
+                            let nearest = env.earthquakes.min {
+                                abs($0.magnitude - event.magnitude)
+                                    < abs($1.magnitude - event.magnitude)
+                            }
+                            env.requestedShake = AppEnvironment.RequestedShake(
+                                recordID: nearest.map(\.id),
+                                magnitude: event.magnitude,
+                                name: event.place)
+                            env.requestedSection = .simulator
                         }
                     }
                 }

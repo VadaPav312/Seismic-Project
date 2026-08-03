@@ -53,6 +53,11 @@ final class AppEnvironment: ObservableObject {
     /// See `EmergencyCallController` for why.
     let emergencyCall = EmergencyCallController()
 
+    /// Set by the app at launch, so an event can break through a locked screen.
+    /// Weak-ish by convention rather than owned here: notifications are a
+    /// system service the app configures, not part of this graph.
+    weak var notifications: NotificationCentre?
+
     /// How many credentials were found in `.env` at first launch. Surfaced once,
     /// in Settings, and never as a prompt — the app owes the user a working
     /// experience whether or not they ever add a key.
@@ -82,6 +87,22 @@ final class AppEnvironment: ObservableObject {
     /// Routing the request through the one object every screen already has is
     /// simpler than threading a callback through each of them.
     @Published var requestedSection: AppSection?
+
+    /// An earthquake somebody asked to be run against their own building.
+    ///
+    /// Set from the feed, honoured by the simulator. Routed through here for
+    /// the same reason `requestedSection` is: the feed is a list inside a tab
+    /// and the simulator is somewhere else entirely, and the alternative is
+    /// threading a callback down through both.
+    @Published var requestedShake: RequestedShake?
+
+    struct RequestedShake: Equatable {
+        var id = UUID()
+        /// The catalogue record to play, when one matches.
+        var recordID: UUID?
+        var magnitude: Double
+        var name: String
+    }
 
     /// Live motion data, deliberately on its own object rather than published
     /// here. See `NodeStream` — publishing a 20 Hz stream from this object was
@@ -213,7 +234,11 @@ final class AppEnvironment: ObservableObject {
         self.services = hub
         self.voice = VoiceController(speech: hub.speech)
         self.sync = SyncEngine(store: store, cloud: hub.cloud) { [weak hub] in hub?.account }
-        self.didCompleteOnboarding = UserDefaults.standard.bool(forKey: "didCompleteOnboarding")
+        // The same escape hatch as the sign-in skip, and for the same reason: a
+        // screenshot run cannot tap through an introduction.
+        self.didCompleteOnboarding =
+            UserDefaults.standard.bool(forKey: "didCompleteOnboarding")
+            || ProcessInfo.processInfo.environment["SEISMIC_SKIP_SIGN_IN"] == "1"
         wireNode()
     }
 
@@ -654,16 +679,52 @@ final class AppEnvironment: ObservableObject {
     /// three sensors bolted to the structure against one phone that might be in
     /// a pocket — so it is allowed to raise the event on its own.
     private func nodeDeclaredEvent(isDrill: Bool) {
+        // Get the phone out of a pocket.
+        //
+        // The whole point of a node bolted to the structure is that it notices
+        // before a person does — and the person is very often in another room
+        // with the phone face down. So the declaration is a sustained buzz and
+        // a critical notification, not a badge: it has to be felt through a
+        // coat, and it has to arrive with the screen locked, which a haptic
+        // alone does not.
+        Haptics.shared.play(.eventTriggered)
+        notifications?.notify(
+            .earlyWarning,
+            title: isDrill ? "Drill: earthquake detected" : "Earthquake detected",
+            body: isDrill
+                ? "The node is running its full sequence. Nothing is really happening."
+                : "Your node detected shaking on two of three sensors. Drop, cover and hold on.")
+
         if activeEvent == nil {
             let trigger = link.lastTrigger?.ratio ?? 0
+            // A magnitude from the node's own samples, by the same
+            // single-station estimator the phone path uses.
+            //
+            // It was nil, so the takeover showed no magnitude at all for a
+            // node-declared event — the first number anybody asks for, missing
+            // from the one screen that exists to answer questions quickly. A
+            // single station cannot know magnitude the way a network can, and
+            // the estimate is labelled "estimated" for that reason, but a
+            // labelled estimate from real samples beats a blank.
+            let record = session.bufferedRecord()
+            var magnitude: Double?
+            var intensity: MercalliIntensity?
+            if let pick = ArrivalPicker.pickP(record.z),
+               let estimate = EarlyMagnitude.estimate(record.z, pArrival: pick.time) {
+                magnitude = estimate.magnitude
+                intensity = AttenuationModel.predict(magnitude: estimate.magnitude,
+                                                     distanceKm: 30).mercalli
+            }
+
             activeEvent = ActiveEvent(startedAt: Date(), triggerRatio: trigger,
-                                      estimatedMagnitude: nil,
+                                      estimatedMagnitude: magnitude,
                                       secondsUntilStrongShaking: 5,
-                                      expectedIntensity: nil,
+                                      expectedIntensity: intensity,
                                       isDrill: isDrill)
             Haptics.shared.startCountdown(seconds: 5)
             live.start(buildingName: selectedBuilding?.name ?? "Your building",
-                       secondsUntilShaking: 5, magnitude: nil, intensity: nil, isDrill: isDrill)
+                       secondsUntilShaking: 5, magnitude: magnitude,
+                       intensity: intensity, isDrill: isDrill)
         }
         placeEmergencyCall()
     }
@@ -786,6 +847,19 @@ final class AppEnvironment: ObservableObject {
         // another nine seconds.
         Haptics.shared.stopCountdown()
         Haptics.shared.play(.selection)
+        emergencyCall.hangUp()
+
+        // And the board stands down with them.
+        //
+        // It was left holding a red light and a latched event state until
+        // somebody walked over and pressed its button — so the demonstration
+        // ended with the phone saying everything was fine and the hardware
+        // still saying it was not. RESET restores the actuators, clears the
+        // state machine and puts the light back to green, which is the node's
+        // way of saying the same thing the phone just said.
+        if sensorSource == .node, link.connection.isLive {
+            link.send(.reset)
+        }
     }
 
     func dismissActiveEvent() {

@@ -486,6 +486,20 @@ struct DeviceControlScreen: View {
         .padding(.vertical, Theme.Metrics.s2)
     }
 
+    /// Extracted so the compiler does not have to type-check a five-way string
+    /// concatenation inside a ternary inside a view builder, which it declines
+    /// to do in reasonable time.
+    private func evidence(for verification: SeismicNodeLink.Verification) -> String {
+        if verification.confirmed {
+            return "Confirmed by the photoresistor: the light went from \(verification.before) "
+                + "to \(verification.after), a change of \(verification.delta). That is the "
+                + "difference between reporting POWER CUT CONFIRMED and merely POWER CUT "
+                + "COMMANDED."
+        }
+        return "Not confirmed. The light moved only \(verification.delta), which is below the "
+            + "threshold — so the command was sent and its effect was not observed."
+    }
+
     private var waterDetail: String {
         switch link.actuators[.water] {
         case .confirmed: "Stepper completed its travel"
@@ -657,33 +671,16 @@ struct DeviceControlScreen: View {
             HStack {
                 Label(actuator.label, systemImage: actuator.systemImage)
                     .font(Theme.Typography.callout)
-                    .foregroundStyle(actuator.isAvailableInFirmware
-                                     ? Theme.Palette.textPrimary : Theme.Palette.textTertiary)
+                    .foregroundStyle(Theme.Palette.textPrimary)
                 Spacer()
-                if actuator.isAvailableInFirmware {
-                    StatusPill(text: (link.actuators[actuator] ?? .idle).label,
-                               tint: (link.actuators[actuator] ?? .idle).isProven
-                                   ? Theme.Palette.accent : Theme.Palette.textSecondary)
-                } else {
-                    StatusPill(text: "UNAVAILABLE", tint: Theme.Palette.textSecondary)
-                }
+                StatusPill(text: (link.actuators[actuator] ?? .idle).label,
+                           tint: (link.actuators[actuator] ?? .idle).isProven
+                               ? Theme.Palette.accent : Theme.Palette.textSecondary)
             }
 
-            if let reason = actuator.unavailableReason {
-                Text(reason)
-                    .font(Theme.Typography.caption)
-                    .foregroundStyle(Theme.Palette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if let verification = link.verifications[actuator] {
+            if let verification = link.verifications[actuator] {
                 // The evidence, not the claim.
-                Text(verification.confirmed
-                     ? "Confirmed by the photoresistor: the light went from "
-                       + "\(verification.before) to \(verification.after), a change of "
-                       + "\(verification.delta). That is the difference between reporting "
-                       + "POWER CUT CONFIRMED and merely POWER CUT COMMANDED."
-                     : "Not confirmed. The light moved only \(verification.delta), which is "
-                       + "below the threshold — so the command was sent and its effect was "
-                       + "not observed.")
+                Text(evidence(for: verification))
                     .font(Theme.Typography.caption)
                     .foregroundStyle(verification.confirmed ? Theme.Palette.textSecondary
                                                             : Theme.Palette.verdictAmber)
@@ -703,8 +700,6 @@ struct DeviceControlScreen: View {
                                       command: .water(closed: true))
                         commandButton("Open", systemImage: "drop",
                                       command: .water(closed: false))
-                    case .gas:
-                        EmptyView()
                     }
                 }
             }

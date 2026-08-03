@@ -61,8 +61,15 @@ enum AppSection: String, CaseIterable, Identifiable, Hashable {
     /// things you do about it. Settings is deliberately absent; it has its own
     /// button in the toolbar because it is the one destination people go
     /// looking for by habit.
-    static let secondary: [AppSection] = [.assess, .channels, .device, .analysis, .library,
-                                          .node, .feed, .prepare, .household, .network,
+    /// Reached from the orb.
+    ///
+    /// Fewer than there were. "Hardware" and "Sensors" were two entries into
+    /// one subject — the board — and somebody looking for the fusion vote had
+    /// to already know it lived under the second and not the first. They are
+    /// now two panes of one screen. "Node" was a third view of the same thing
+    /// and has gone with them.
+    static let secondary: [AppSection] = [.assess, .device, .analysis, .library,
+                                          .feed, .prepare, .household, .network,
                                           .shakeTable]
 }
 
@@ -114,20 +121,24 @@ struct RootView: View {
             // entire screen and nothing competes with it — not a tab bar, not a
             // navigation title, not a sheet.
             if let event = env.activeEvent {
-                EventTakeoverView(event: event)
+                EventTakeoverView(link: env.link, call: env.emergencyCall, event: event)
                     .transition(.opacity.combined(with: .scale(scale: 1.04)))
                     .zIndex(100)
             }
 
-            // Above even the takeover, because a call in progress is the one
-            // thing that has to be interruptible: somebody who wants to speak
-            // to the dispatcher themselves must be able to reach the screen.
-            // Wrapped in its own view so the call object is *observed*. Reading
-            // `env.emergencyCall.stage` here directly would not redraw
-            // anything: the call is its own ObservableObject, and a change
-            // inside it never republishes the environment that holds it.
-            EmergencyCallHost(call: env.emergencyCall)
-                .zIndex(110)
+            // Only when there is no takeover to fold it into.
+            //
+            // It used to sit above the takeover as a second full-screen page,
+            // so during the ten seconds that matter the countdown and the
+            // instruction were both behind a dispatcher transcript nobody
+            // needs to read while getting under a table. When a warning is up
+            // the call is one line at the top of it; the full call screen is
+            // for the case where somebody places it afterwards, from the
+            // assessment, with no event running.
+            if env.activeEvent == nil {
+                EmergencyCallHost(call: env.emergencyCall)
+                    .zIndex(110)
+            }
 
             // Below the takeover in the stack, deliberately: if a real event
             // happens during a demonstration, the demonstration gets out of
@@ -176,6 +187,12 @@ struct RootView: View {
                 return
             }
             startTutorialIfDue()
+            if ProcessInfo.processInfo.environment["SEISMIC_DEMO_EVENT"] == "1" {
+                Task { @MainActor in
+                    try? await Task.sleep(for: .seconds(2))
+                    env.link.send(.drill)
+                }
+            }
             if ProcessInfo.processInfo.environment["SEISMIC_SHOWCASE"] == "1" {
                 env.presentationMode = .showcase
                 env.isPresentationMode = true
@@ -309,7 +326,7 @@ struct RootView: View {
             env.session.send(.requestPeriodMeasurement)
             show(.monitor)
         case .closeGas:
-            env.session.send(.fireActuator(.gasValve))
+            env.session.send(.fireActuator(.mainsPower))
         case .callHousehold:
             show(.household)
         case .showMap:
@@ -475,8 +492,8 @@ struct RootView: View {
         case .shakeTable: ShakeTableScreen()
         case .analysis: AnalysisScreen()
         case .settings: SettingsScreen()
-        case .device: DeviceControlScreen(link: env.link)
-        case .channels: SensorChannelsScreen(link: env.link)
+        case .device: HardwareScreen(link: env.link)
+        case .channels: HardwareScreen(link: env.link)
         }
     }
 }

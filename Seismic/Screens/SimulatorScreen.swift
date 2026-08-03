@@ -86,7 +86,14 @@ struct SimulatorScreen: View {
                 controlPanel
             }
         }
-        .onAppear { setUp() }
+        .onAppear {
+            setUp()
+            if let request = env.requestedShake { honour(request) }
+        }
+        .onChange(of: env.requestedShake) { _, request in
+            guard let request else { return }
+            honour(request)
+        }
         .onDisappear {
             sonifier.stop()
             // A display link holds its target strongly, so a recording left
@@ -202,6 +209,30 @@ struct SimulatorScreen: View {
                 Text(building.name)
                     .font(Theme.Typography.headline)
                     .foregroundStyle(Theme.Palette.textPrimary)
+
+                // The magnitude, as the largest thing here after the name.
+                //
+                // It was buried in the record picker further down the screen,
+                // so the one question anybody watching a building being shaken
+                // asks first — how big is this — was answered several scrolls
+                // away from the shaking.
+                if let record {
+                    HStack(alignment: .firstTextBaseline, spacing: 5) {
+                        Text("M")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(Theme.Palette.textSecondary)
+                        Text(String(format: "%.1f", record.magnitude))
+                            .font(.system(size: 34, weight: .bold, design: .rounded))
+                            .foregroundStyle(magnitudeTint(record.magnitude))
+                            .monospacedDigit()
+                            .contentTransition(.numericText())
+                    }
+                    Text("\(record.name) · \(String(record.year))")
+                        .font(Theme.Typography.caption)
+                        .foregroundStyle(Theme.Palette.textSecondary)
+                        .lineLimit(1)
+                        .padding(.top, -4)
+                }
 
                 if let result = runner.result {
                     VStack(alignment: .leading, spacing: 6) {
@@ -954,6 +985,34 @@ struct SimulatorScreen: View {
                     .foregroundStyle(Theme.Palette.accent)
                 }
             }
+        }
+    }
+
+    /// Magnitude bands, coloured the way the feed colours them so the same
+    /// number does not change meaning between two screens.
+    private func magnitudeTint(_ magnitude: Double) -> Color {
+        switch magnitude {
+        case ..<4: Theme.Palette.textPrimary
+        case 4..<5.5: Theme.Palette.accent
+        case 5.5..<7: Theme.Palette.verdictAmber
+        default: Theme.Palette.verdictRed
+        }
+    }
+
+    /// Runs an earthquake somebody asked for from somewhere else.
+    ///
+    /// The feed's "shake my building with it" is the only caller. It matches a
+    /// catalogue record by magnitude, because a real record is a real
+    /// accelerogram and scaling a different one to the right peak would be
+    /// presenting a fabricated waveform as a recording.
+    private func honour(_ request: AppEnvironment.RequestedShake) {
+        env.requestedShake = nil
+        if let recordID = request.recordID { selectedRecordID = recordID }
+        rebuild()
+        // A beat, so the scene is built and the camera framed before it moves.
+        Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(450))
+            runIt()
         }
     }
 

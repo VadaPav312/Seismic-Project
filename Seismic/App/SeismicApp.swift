@@ -20,7 +20,14 @@ struct SeismicApp: App {
                 .environmentObject(notifications)
                 // Dark-first: the instrument look is the design, not a theme.
                 .preferredColorScheme(.dark)
-                .task { await environment.bootstrap() }
+                .task {
+                    // Handed over before bootstrap, so a node that declares an
+                    // event during launch can still break through a locked
+                    // screen. A board that has already been shaking when the
+                    // app opens is not hypothetical.
+                    environment.notifications = notifications
+                    await environment.bootstrap()
+                }
                 // Coming back to the foreground is the most reliable moment to
                 // find both a network and a queue with something in it — and
                 // the only moment at which a permission the user just changed

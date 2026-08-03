@@ -280,9 +280,8 @@ final class FirmwareNodeTransport: NodeTransport, @unchecked Sendable {
 
     private static func actuatorKind(for device: Firmware.Actuator) -> ActuatorKind? {
         switch device {
-        case .power: nil            // the app's ActuatorKind has no mains entry
+        case .power: .mainsPower
         case .water: .waterMain
-        case .gas: .gasValve
         }
     }
 
@@ -304,7 +303,6 @@ final class FirmwareNodeTransport: NodeTransport, @unchecked Sendable {
             switch kind {
             case .mainsPower: .power(on: false)
             case .waterMain: .water(closed: true)
-            case .gasValve: nil          // modelled, and not fitted. See the console.
             }
         case .resetActuator: .reset
         case .abort: .disarm
