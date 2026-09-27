@@ -1,0 +1,12 @@
+
+
+Outline
+
+Every year, 10000 - 20000 people die and hundreds of thousands of buildings collapse each year due to Earthquakes.
+My name is Vihaan Gandhi and I made the app Seismic!
+
+Seismic, in native IOS, serves as a centralized software and hardware application to protect individuals and buildings
+from Earthquakes before an earthquake's destructive wave arrives, acts
+to make a building safe, measures whether that building's structural behaviour
+changed, and lets anyone pull a real building into a 3D simulator and shake it
+with a real earthquake record.
